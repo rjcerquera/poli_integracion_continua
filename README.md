@@ -1,15 +1,24 @@
-# 💸 Expense Manager - Aplicación de Gestión de Gastos Personales
+# 🔄 Proyecto de Integración Continua (CI/CD)
 
-Aplicación web full-stack para la gestión de gastos personales con autenticación, categorización de gastos y visualización de estadísticas.
+Sistema completo de Integración Continua que integra una aplicación web full-stack (Expense Manager) con herramientas de DevOps para automatizar el ciclo de desarrollo, pruebas y despliegue.
 
 ## 📋 Descripción
 
-Sistema completo de gestión de gastos personales que permite a los usuarios:
+Este proyecto demuestra una arquitectura completa de CI/CD que incluye:
+
+### Aplicación Principal: Expense Manager
+Aplicación web full-stack para la gestión de gastos personales que permite a los usuarios:
 - Registrarse e iniciar sesión de forma segura
 - Crear y gestionar categorías personalizadas con iconos y colores
 - Registrar gastos con fechas y descripciones
 - Visualizar resúmenes y estadísticas de gastos
 - Consultar documentación interactiva de la API
+
+### Infraestructura CI/CD
+- **Gitea**: Servidor Git liviano para control de versiones
+- **Jenkins**: Servidor de CI/CD con pipelines automatizados
+- **Gitea Bootstrap**: Script de inicialización automática de Gitea
+- Integración completa entre Gitea y Jenkins con webhooks automáticos
 
 ## 🚀 Tecnologías Utilizadas
 
@@ -28,9 +37,13 @@ Sistema completo de gestión de gastos personales que permite a los usuarios:
 - **Tailwind CSS** - Framework de estilos
 - **Context API** - Gestión de estado para autenticación
 
-### DevOps
+### DevOps & CI/CD
 - **Docker & Docker Compose** - Containerización
 - **Multi-stage builds** - Optimización de imágenes Docker
+- **Gitea** - Servidor Git liviano para control de versiones
+- **Jenkins** - Servidor de CI/CD con pipelines automatizados
+- **Gitea Jenkins Plugin** - Integración nativa entre Gitea y Jenkins
+- **Docker-out-of-Docker (DooD)** - Patrón para ejecutar Docker desde contenedores
 
 ## 📦 Arquitectura
 
@@ -51,15 +64,42 @@ Sistema completo de gestión de gastos personales que permite a los usuarios:
 ┌─────────────────┐      ┌─────────────────┐
 │   Backend       │◄────►│     MySQL       │
 │   Laravel       │      │   Port: 3306    │
-│   PHP-FPM       │      └─────────────────┘
+│   PHP-FPM       │      └────────┬────────┘
+└─────────────────┘               │
+                                  │
+         ┌────────────────────────┴────────────────────────┐
+         │                                                  │
+         ↓                                                  ↓
+┌─────────────────┐                              ┌─────────────────┐
+│     Gitea      │                              │    Jenkins     │
+│  Git Server     │◄───── Webhooks ─────────────►│   CI/CD Server  │
+│  Port: 3001    │                              │   Port: 8081   │
+└────────┬────────┘                              └─────────────────┘
+         │
+         │
+┌─────────────────┐
+│ Gitea Bootstrap │
+│  (Init Script)  │
 └─────────────────┘
 ```
+
+### Componentes CI/CD
+
+- **Gitea** (Puerto 3001): Servidor Git que almacena el código fuente
+- **Jenkins** (Puerto 8081): Servidor CI/CD que ejecuta pipelines automatizados
+- **Gitea Bootstrap**: Script de inicialización que configura Gitea automáticamente
+- **Webhooks**: Integración automática entre Gitea y Jenkins para activar builds
+
+Para más detalles sobre la configuración de Gitea, consulta [gitea-bootstrap/README.md](gitea-bootstrap/README.md).
+
+Para más detalles sobre la configuración de Jenkins, consulta [jenkins/README.md](jenkins/README.md).
 
 ## 🛠️ Requisitos Previos
 
 - Docker Engine 20.10+
 - Docker Compose 2.0+
-- Puertos disponibles: 3000, 8080, 3306
+- Puertos disponibles: 3000, 8080, 3306, 3001, 8081, 2223, 50000
+- Acceso al socket de Docker (`/var/run/docker.sock`) para DooD (Docker-out-of-Docker)
 
 ## 📥 Instalación y Configuración
 
@@ -70,34 +110,45 @@ git clone <repository-url>
 cd project
 ```
 
-### 2. Configuración del Backend
+### 2. Configuración de Variables de Entorno
 
-Crear archivo `.env` en `app_backend/`:
+Crear archivo `.env` en la raíz del proyecto:
+
+```bash
+cp env.example .env
+```
+
+Editar `.env` y configurar las variables necesarias. Las más importantes:
+
+```env
+# Configuración de Gitea
+GITEA_ADMIN_USER=admin
+GITEA_ADMIN_PASSWORD=admin123
+GITEA_ADMIN_EMAIL=admin@example.com
+GITEA_HTTP_PORT=3001
+
+# Configuración de Jenkins
+JENKINS_ADMIN_ID=admin
+JENKINS_ADMIN_PASSWORD=admin123
+JENKINS_HTTP_PORT=8081
+
+# Configuración del repositorio
+GITEA_REPO_NAME=poli_integracion_continua
+GITEA_REPO_PRIVATE=false
+GITEA_AUTO_PUSH=true
+```
+
+Para más detalles sobre todas las variables disponibles, consulta `env.example`.
+
+### 3. Configuración del Backend (Opcional)
+
+Si deseas configurar el backend de Expense Manager, crear archivo `.env` en `app_backend/`:
 
 ```bash
 cp app_backend/.env.example app_backend/.env
 ```
 
-Configurar variables de entorno en `app_backend/.env`:
-
-```env
-APP_NAME="Expense Manager"
-APP_ENV=production
-APP_DEBUG=false
-APP_URL=http://localhost:8080
-
-DB_CONNECTION=mysql
-DB_HOST=mysql
-DB_PORT=3306
-DB_DATABASE=laravel
-DB_USERNAME=laravel
-DB_PASSWORD=secret
-
-SANCTUM_STATEFUL_DOMAINS=localhost:3000
-SESSION_DOMAIN=localhost
-```
-
-### 3. Construir y Levantar los Contenedores
+### 4. Construir y Levantar los Contenedores
 
 ```bash
 # Construir las imágenes
@@ -107,33 +158,64 @@ docker-compose build
 docker-compose up -d
 ```
 
-### 4. Ejecutar Migraciones
+### 5. Verificar Servicios CI/CD
+
+Una vez levantados los contenedores, verifica que los servicios estén disponibles:
+
+- **Gitea**: http://localhost:3001
+  - Usuario admin: Configurado en `GITEA_ADMIN_USER` y `GITEA_ADMIN_PASSWORD`
+  - El script `gitea-bootstrap` crea automáticamente el usuario admin y el repositorio
+
+- **Jenkins**: http://localhost:8081
+  - Usuario admin: Configurado en `JENKINS_ADMIN_ID` y `JENKINS_ADMIN_PASSWORD`
+  - El pipeline `health-check-pipeline` se crea automáticamente
+
+> **Nota**: El servicio `gitea-bootstrap` se ejecuta una sola vez al iniciar los contenedores y configura automáticamente Gitea (crea base de datos, usuario admin, usuario Jenkins, y repositorio).
+
+### 6. (Opcional) Ejecutar Migraciones del Backend
+
+Si estás usando el backend de Expense Manager:
 
 ```bash
 docker-compose exec backend php artisan migrate
-```
-
-### 5. (Opcional) Sembrar Datos de Prueba
-
-```bash
 docker-compose exec backend php artisan db:seed
 ```
 
 ## 🎯 Uso
 
-### Acceder a la Aplicación
+### Acceder a los Servicios
 
+#### Aplicación Expense Manager
 - **Frontend**: http://localhost:3000
 - **Backend API**: http://localhost:8080
 - **Documentación Swagger**: http://localhost:8080/api/documentation
 
-### Flujo de Uso
+#### Servicios CI/CD
+- **Gitea**: http://localhost:3001
+  - Usuario admin: Configurado en `.env` (`GITEA_ADMIN_USER` / `GITEA_ADMIN_PASSWORD`)
+  - Repositorio: Creado automáticamente por `gitea-bootstrap`
+- **Jenkins**: http://localhost:8081
+  - Usuario admin: Configurado en `.env` (`JENKINS_ADMIN_ID` / `JENKINS_ADMIN_PASSWORD`)
+  - Pipeline: `health-check-pipeline` creado automáticamente
+
+### Flujo de Uso de la Aplicación
 
 1. **Registrar una cuenta** en http://localhost:3000/register
 2. **Iniciar sesión** en http://localhost:3000/login
 3. **Crear categorías** para organizar tus gastos
 4. **Registrar gastos** con montos, fechas y categorías
 5. **Visualizar estadísticas** en el dashboard
+
+### Flujo de CI/CD
+
+1. **Acceder a Gitea** y verificar que el repositorio fue creado
+2. **Hacer push de código** al repositorio en Gitea
+3. **Verificar en Jenkins** que el webhook activó el pipeline automáticamente
+4. **Revisar el pipeline** `health-check-pipeline` que valida la integración
+
+Para más detalles sobre la configuración y uso de Gitea, consulta [gitea-bootstrap/README.md](gitea-bootstrap/README.md).
+
+Para más detalles sobre la configuración y uso de Jenkins, consulta [jenkins/README.md](jenkins/README.md).
 
 ## 📡 Endpoints del API
 
@@ -342,7 +424,23 @@ project/
 ├── nginx/                    # Configuración Nginx
 │   └── default.conf
 │
-└── docker-compose.yml        # Orquestación de contenedores
+├── gitea-bootstrap/          # Inicialización automática de Gitea
+│   ├── Dockerfile
+│   ├── init-gitea-complete.sh
+│   └── README.md            # 📖 Ver documentación detallada
+│
+├── jenkins/                  # Configuración Jenkins CI/CD
+│   ├── Dockerfile
+│   ├── Jenkinsfile          # Pipeline de CI/CD
+│   ├── jenkins.yaml         # Configuración as Code (JCasC)
+│   ├── plugins.txt          # Plugins pre-instalados
+│   ├── init-scripts/        # Scripts de inicialización
+│   │   └── createPipeline.groovy
+│   └── README.md            # 📖 Ver documentación detallada
+│
+├── docker-compose.yml        # Orquestación de contenedores
+├── env.example              # Variables de entorno de ejemplo
+└── README.md               # Este archivo
 ```
 
 ## ✨ Características
@@ -366,12 +464,17 @@ project/
 - ✅ Selectores visuales de iconos y colores
 - ✅ Formato de fechas y monedas
 
-### DevOps
+### DevOps & CI/CD
 - ✅ Containerización completa con Docker
 - ✅ Multi-stage builds para optimización
-- ✅ Volúmenes persistentes para MySQL
+- ✅ Volúmenes persistentes para MySQL, Jenkins y Gitea
 - ✅ Red interna entre servicios
 - ✅ Configuración de entorno separada
+- ✅ **Gitea**: Servidor Git con inicialización automática
+- ✅ **Jenkins**: CI/CD con pipelines automatizados
+- ✅ **Integración Gitea-Jenkins**: Webhooks automáticos
+- ✅ **Docker-out-of-Docker (DooD)**: Ejecución de Docker desde contenedores
+- ✅ **Configuración as Code**: Jenkins configurado mediante JCasC
 
 ## 🔧 Comandos Útiles
 
@@ -446,6 +549,42 @@ docker-compose exec mysql mysqldump -u laravel -psecret laravel > backup.sql
 docker-compose exec -T mysql mysql -u laravel -psecret laravel < backup.sql
 ```
 
+### Gitea
+
+```bash
+# Ver logs de Gitea
+docker-compose logs -f gitea
+
+# Acceder al contenedor de Gitea
+docker-compose exec gitea sh
+
+# Reiniciar Gitea
+docker-compose restart gitea
+
+# Ver logs del proceso de inicialización
+docker-compose logs gitea-bootstrap
+```
+
+Para más detalles sobre Gitea, consulta [gitea-bootstrap/README.md](gitea-bootstrap/README.md).
+
+### Jenkins
+
+```bash
+# Ver logs de Jenkins
+docker-compose logs -f jenkins
+
+# Acceder al contenedor de Jenkins
+docker-compose exec jenkins bash
+
+# Reiniciar Jenkins
+docker-compose restart jenkins
+
+# Verificar plugins instalados
+docker-compose exec jenkins ls /var/jenkins_home/plugins
+```
+
+Para más detalles sobre Jenkins, consulta [jenkins/README.md](jenkins/README.md).
+
 ## 🐛 Solución de Problemas
 
 ### El backend no inicia
@@ -486,7 +625,52 @@ docker-compose exec backend php artisan migrate:fresh
 docker-compose exec backend php artisan migrate:fresh --seed
 ```
 
+### Gitea no inicia o no se inicializa correctamente
+```bash
+# Ver logs del proceso de inicialización
+docker-compose logs gitea-bootstrap
+
+# Verificar que MySQL esté disponible
+docker-compose ps mysql
+
+# Re-ejecutar el proceso de inicialización (detener y volver a levantar)
+docker-compose down
+docker-compose up -d
+```
+
+Para más detalles sobre solución de problemas de Gitea, consulta la sección [Troubleshooting](gitea-bootstrap/README.md#-troubleshooting) en gitea-bootstrap/README.md.
+
+### Jenkins no inicia o el pipeline no se ejecuta
+```bash
+# Ver logs de Jenkins
+docker-compose logs jenkins
+
+# Verificar que Gitea esté disponible
+curl http://localhost:3001/api/v1/version
+
+# Verificar configuración del plugin Gitea
+docker-compose exec jenkins cat /var/jenkins_home/jenkins.yaml | grep -A 10 gitea
+```
+
+Para más detalles sobre solución de problemas de Jenkins, consulta la sección [Troubleshooting](jenkins/README.md#-troubleshooting) en jenkins/README.md.
+
 ## 📝 Variables de Entorno
+
+Las variables de entorno principales se configuran en el archivo `.env` en la raíz del proyecto. Para ver todas las variables disponibles, consulta `env.example`.
+
+### Variables Principales
+
+| Variable | Descripción | Valor por Defecto |
+|----------|-------------|-------------------|
+| `GITEA_ADMIN_USER` | Usuario administrador de Gitea | admin |
+| `GITEA_ADMIN_PASSWORD` | Contraseña del admin de Gitea | admin123 |
+| `GITEA_HTTP_PORT` | Puerto externo de Gitea | 3001 |
+| `JENKINS_ADMIN_ID` | Usuario administrador de Jenkins | admin |
+| `JENKINS_ADMIN_PASSWORD` | Contraseña del admin de Jenkins | admin123 |
+| `JENKINS_HTTP_PORT` | Puerto externo de Jenkins | 8081 |
+| `GITEA_REPO_NAME` | Nombre del repositorio | poli_integracion_continua |
+| `GITEA_REPO_PRIVATE` | Repositorio privado (true/false) | false |
+| `GITEA_AUTO_PUSH` | Push automático del código | true |
 
 ### Backend (`app_backend/.env`)
 
@@ -507,11 +691,20 @@ docker-compose exec backend php artisan migrate:fresh --seed
 |----------|-------------|-------|
 | `NEXT_PUBLIC_API_URL` | URL del API | http://localhost:8080/api |
 
+Para más detalles sobre las variables de entorno de Gitea, consulta la sección [Configuración](gitea-bootstrap/README.md#-configuración) en gitea-bootstrap/README.md.
+
+Para más detalles sobre las variables de entorno de Jenkins, consulta la sección [Credenciales Parametrizables](jenkins/README.md#-credenciales-parametrizables) en jenkins/README.md.
+
 
 ## 📄 Licencia
 
 Este proyecto es de código abierto y está disponible bajo la Licencia MIT.
 
+
+## 📚 Documentación Adicional
+
+- **[gitea-bootstrap/README.md](gitea-bootstrap/README.md)**: Documentación completa sobre la inicialización automática de Gitea, creación de usuarios, repositorios y el patrón Docker-out-of-Docker (DooD).
+- **[jenkins/README.md](jenkins/README.md)**: Documentación completa sobre la configuración de Jenkins, pipelines, integración con Gitea y el patrón Docker-out-of-Docker (DooD).
 
 ## 🙏 Agradecimientos
 
@@ -519,4 +712,6 @@ Este proyecto es de código abierto y está disponible bajo la Licencia MIT.
 - Next.js Team
 - Tailwind CSS
 - Docker Community
+- Gitea Project
+- Jenkins Project
 

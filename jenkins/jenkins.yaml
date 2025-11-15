@@ -1,0 +1,82 @@
+# Jenkins Configuration as Code (JCasC)
+# Este archivo configura Jenkins automáticamente al iniciar
+
+jenkins:
+  # Configuración de seguridad
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_ID:-admin}"
+          password: "${JENKINS_ADMIN_PASSWORD:-admin123}"
+          name: "Administrator"
+          description: "Jenkins Admin User"
+
+  # Configuración de autorización
+  authorizationStrategy:
+    globalMatrix:
+      permissions:
+        - "Overall/Administer:${JENKINS_ADMIN_ID:-admin}"
+        - "Overall/Read:authenticated"
+
+  # Configuración del sistema
+  systemMessage: |
+    🚀 Jenkins CI/CD Server
+    Integrado con Gitea y Docker
+    
+    Credenciales por defecto:
+    - Usuario: admin
+    - Cambiar contraseña después del primer login
+
+  # Número de ejecutores
+  numExecutors: 2
+  
+  # Modo de etiquetas
+  mode: NORMAL
+
+  # Configuración de seguridad adicional
+  crumbIssuer:
+    standard:
+      excludeClientIPFromCrumb: true
+
+# Configuración de credenciales
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          # Credencial para Gitea usando usuario/contraseña
+          - usernamePassword:
+              scope: GLOBAL
+              id: "gitea-credentials"
+              username: "${GITEA_USERNAME:-jenkins}"
+              password: "${GITEA_PASSWORD:-jenkins123}"
+              description: "Credenciales de usuario para Gitea"
+
+# Configuración de herramientas
+tool:
+  git:
+    installations:
+      - name: "Default"
+        home: "git"
+
+# Configuración de notificaciones (opcional)
+unclassified:
+  location:
+    url: "http://localhost:8081/"
+    adminAddress: "admin@example.com"
+  
+  # Configuración de servidores Gitea
+  giteaServers:
+    servers:
+      - displayName: "Gitea Server"
+        # NOTA: Dentro de la red Docker, usar el nombre del SERVICIO (gitea), no el nombre del contenedor
+        serverUrl: "http://gitea:3000"
+        manageHooks: true
+        # Credenciales: usar usuario/contraseña
+        credentialsId: "gitea-credentials"
+
+  # Timezone
+  timestamper:
+    allPipelines: true
+    elapsedTimeFormat: "'<b>'HH:mm:ss.S'</b> '"
+    systemTimeFormat: "'<b>'HH:mm:ss'</b> '"

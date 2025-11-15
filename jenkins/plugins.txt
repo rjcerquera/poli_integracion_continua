@@ -1,0 +1,85 @@
+# Jenkins Plugins para CI/CD con Gitea y Docker
+# Usar :latest para evitar conflictos de dependencias
+
+# ============================================
+# PLUGINS ESENCIALES DE GITEA
+# ============================================
+gitea:latest
+
+# ============================================
+# PLUGINS DE GIT
+# ============================================
+git:latest
+git-client:latest
+git-parameter:latest
+github-branch-source:latest
+
+# ============================================
+# PLUGINS DE PIPELINE
+# ============================================
+workflow-aggregator:latest
+workflow-multibranch:latest
+pipeline-stage-view:latest
+pipeline-graph-view:latest
+pipeline-build-step:latest
+
+# ============================================
+# WEBHOOKS
+# ============================================
+generic-webhook-trigger:latest
+
+# ============================================
+# CREDENCIALES Y SEGURIDAD (versiones actualizadas)
+# ============================================
+credentials:latest
+credentials-binding:latest
+plain-credentials:latest
+
+# ============================================
+# DOCKER
+# ============================================
+docker-workflow:latest
+docker-plugin:latest
+docker-commons:latest
+
+# ============================================
+# CONFIGURACIÓN COMO CÓDIGO (JCasC)
+# ============================================
+configuration-as-code:latest
+
+# ============================================
+# JOB DSL (Para crear jobs programáticamente)
+# ============================================
+job-dsl:latest
+
+# ============================================
+# UI MEJORADA - BLUE OCEAN
+# ============================================
+blueocean:latest
+
+# ============================================
+# UTILIDADES
+# ============================================
+timestamper:latest
+ws-cleanup:latest
+ansicolor:latest
+build-timeout:latest
+mailer:latest
+junit:latest
+
+# ============================================
+# NOTIFICACIONES (sin email-ext y slack por problemas de dependencias)
+# ============================================
+# email-ext y slack tienen dependencias complejas, se pueden instalar manualmente después
+
+# ============================================
+# ANÁLISIS DE CÓDIGO
+# ============================================
+warnings-ng:latest
+
+# ============================================
+# AUTENTICACIÓN
+# ============================================
+matrix-auth:latest
+role-strategy:latest
+

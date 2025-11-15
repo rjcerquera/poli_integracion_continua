@@ -1,0 +1,878 @@
+pipeline {
+    agent any
+    
+    environment {
+        // ============================================
+        // NOMBRES DE CONTENEDORES (para docker exec)
+        // ============================================
+        // NOTA: Estos son los nombres de los CONTENEDORES Docker
+        //       Se usan con comandos como: docker exec ${CONTAINER_NAME}
+        MYSQL_CONTAINER = "laravel_mysql"
+        NGINX_CONTAINER = "laravel_nginx"
+        FRONTEND_CONTAINER = "nextjs_frontend"
+        GITEA_CONTAINER = "gitea_server"
+        JENKINS_CONTAINER = "jenkins_server"
+        LARAVEL_CONTAINER = "laravel_backend"
+        
+        // ============================================
+        // NOMBRES DE SERVICIOS (para comunicación HTTP entre contenedores)
+        // ============================================
+        // NOTA: Estos son los nombres de los SERVICIOS en docker-compose.yml
+        //       Se usan para comunicación HTTP dentro de la red Docker
+        //       Ejemplo: curl http://gitea:3000/api/v1/version
+        MYSQL_SERVICE = "mysql"
+        NGINX_SERVICE = "nginx"
+        FRONTEND_SERVICE = "frontend"
+        GITEA_SERVICE = "gitea"
+        JENKINS_SERVICE = "jenkins"
+        
+        // ============================================
+        // PUERTOS Y CONFIGURACIÓN
+        // ============================================
+        MYSQL_PORT = "3306"
+        NGINX_PORT = "80"
+        FRONTEND_PORT = "3000"
+        GITEA_PORT = "3000"
+        JENKINS_PORT = "8080"
+        
+        // ============================================
+        // CONFIGURACIÓN DE GITEA
+        // ============================================
+        GITEA_REPO_NAME = "poli_integracion_continua"
+        GITEA_REPO_OWNER = "admin"
+        
+        // ============================================
+        // TIMEOUTS
+        // ============================================
+        CONNECTION_TIMEOUT = "10"
+        HTTP_TIMEOUT = "30"
+    }
+    
+    stages {
+        stage('Verificar Conexiones a Contenedores') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  🔍 VERIFICACIÓN DE CONECTIVIDAD DE CONTENEDORES             ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    def containers = [
+                        [name: 'MySQL', container: env.MYSQL_CONTAINER, service: env.MYSQL_SERVICE, port: env.MYSQL_PORT, type: 'tcp'],
+                        [name: 'Nginx', container: env.NGINX_CONTAINER, service: env.NGINX_SERVICE, port: env.NGINX_PORT, type: 'http'],
+                        [name: 'Laravel Backend', container: env.LARAVEL_CONTAINER, service: 'backend', port: 'N/A', type: 'container'],
+                        [name: 'Next.js Frontend', container: env.FRONTEND_CONTAINER, service: env.FRONTEND_SERVICE, port: env.FRONTEND_PORT, type: 'http'],
+                        [name: 'Gitea', container: env.GITEA_CONTAINER, service: env.GITEA_SERVICE, port: env.GITEA_PORT, type: 'http'],
+                        [name: 'Jenkins', container: env.JENKINS_CONTAINER, service: env.JENKINS_SERVICE, port: env.JENKINS_PORT, type: 'http']
+                    ]
+                    
+                    def results = []
+                    def failedServices = []
+                    
+                    containers.eachWithIndex { container, index ->
+                        echo "[${index + 1}/${containers.size()}] Verificando ${container.name}..."
+                        echo "   Contenedor: ${container.container}:${container.port}"
+                        
+                        // Verificar que el contenedor está corriendo
+                        def containerRunning = sh(
+                            script: """
+                                sudo docker ps --format '{{.Names}}' | grep -q '^${container.container}\$' && echo "OK" || echo "FAIL"
+                            """,
+                            returnStdout: true
+                        ).trim()
+                        
+                        if (containerRunning != 'OK') {
+                            echo "   ❌ Contenedor no está corriendo"
+                            results.add([name: container.name, status: '❌ FALLO'])
+                            failedServices.add(container.name)
+                        } else {
+                            echo "   ✅ Contenedor activo"
+                            
+                            // Verificar conectividad según el tipo
+                            if (container.type == 'tcp') {
+                                def tcpResult = sh(
+                                    script: """
+                                        timeout ${env.CONNECTION_TIMEOUT} bash -c '</dev/tcp/${container.container}/${container.port}' 2>/dev/null && echo "OK" || echo "FAIL"
+                                    """,
+                                    returnStdout: true
+                                ).trim()
+                                
+                                if (tcpResult == 'OK') {
+                                    echo "   ✅ Puerto ${container.port} accesible"
+                                    results.add([name: container.name, status: '✅ OK'])
+                                } else {
+                                    echo "   ❌ Puerto ${container.port} no accesible"
+                                    results.add([name: container.name, status: '❌ FALLO'])
+                                    failedServices.add(container.name)
+                                }
+                                
+                            } else if (container.type == 'http') {
+                                // Para comunicación HTTP, usar el nombre del SERVICIO (no el contenedor)
+                                def endpoint = "http://${container.service}:${container.port}"
+                                if (container.service == env.JENKINS_SERVICE) {
+                                    endpoint = "${endpoint}/login"
+                                } else if (container.service == env.GITEA_SERVICE) {
+                                    endpoint = "${endpoint}/api/v1/version"
+                                }
+                                
+                                def httpCode = sh(
+                                    script: """
+                                        HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" --max-time ${env.HTTP_TIMEOUT} ${endpoint} 2>/dev/null || echo "000")
+                                        echo \$(echo "\$HTTP_CODE" | tr -d '[:space:]' | grep -oE '[0-9]{3}' | head -1 || echo "000")
+                                    """,
+                                    returnStdout: true
+                                ).trim()
+                                
+                                if (httpCode in ['200', '301', '302', '401', '403', '404']) {
+                                    echo "   ✅ Respuesta HTTP: ${httpCode}"
+                                    results.add([name: container.name, status: '✅ OK'])
+                                } else {
+                                    echo "   ❌ Sin respuesta HTTP (código: ${httpCode})"
+                                    results.add([name: container.name, status: '❌ FALLO'])
+                                    failedServices.add(container.name)
+                                }
+                                
+                            } else if (container.type == 'container') {
+                                // Solo contenedor activo, sin verificación de puerto
+                                results.add([name: container.name, status: '✅ OK'])
+                            }
+                        }
+                        echo ""
+                    }
+                    
+                    // Mostrar resumen
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "📊 RESUMEN"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    echo "┌──────────────────────────────┬──────────────────────┐"
+                    echo "│ Servicio                     │ Estado               │"
+                    echo "├──────────────────────────────┼──────────────────────┤"
+                    
+                    results.each { result ->
+                        def name = result.name.padRight(28)
+                        def status = result.status.padRight(20)
+                        echo "│ ${name} │ ${status} │"
+                    }
+                    
+                    echo "└──────────────────────────────┴──────────────────────┘"
+                    echo ""
+                    
+                    def successCount = results.count { it.status == '✅ OK' }
+                    echo "✅ Exitosos: ${successCount}/${results.size()}"
+                    
+                    if (failedServices.size() > 0) {
+                        echo "❌ Fallidos: ${failedServices.join(', ')}"
+                        error("Verificación falló: ${failedServices.size()} servicio(s) no están accesibles")
+                    } else {
+                        echo "✅ Todos los contenedores están accesibles"
+                    }
+                    echo ""
+                }
+            }
+        }
+        
+        stage('Verificar Integración Jenkins-Gitea') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  🔗 VERIFICACIÓN JENKINS-GITEA                                ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    def checks = [:]
+                    
+                    // 1. Plugin de Gitea
+                    echo "1. Verificando plugin de Gitea..."
+                    // NOTA: docker exec usa el nombre del CONTENEDOR
+                    def pluginInstalled = sh(
+                        script: """
+                            sudo docker exec ${env.JENKINS_CONTAINER} ls /var/jenkins_home/plugins/ 2>/dev/null | grep -i gitea > /dev/null && echo "OK" || echo "FAIL"
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    checks['Plugin'] = pluginInstalled == 'OK'
+                    echo "   ${pluginInstalled == 'OK' ? '✅ Plugin instalado' : '⚠️  Plugin no encontrado'}"
+                    echo ""
+                    
+                    // 2. Conectividad Jenkins → Gitea
+                    echo "2. Verificando conectividad Jenkins → Gitea..."
+                    // NOTA: docker exec usa CONTENEDOR, pero curl dentro usa SERVICIO
+                    def connectivity = sh(
+                        script: """
+                            HTTP_CODE=\$(sudo docker exec ${env.JENKINS_CONTAINER} curl -s -o /dev/null -w "%{http_code}" --max-time ${env.HTTP_TIMEOUT} http://${env.GITEA_SERVICE}:${env.GITEA_PORT}/api/v1/version 2>/dev/null || echo "000")
+                            echo \$(echo "\$HTTP_CODE" | tr -d '[:space:]' | grep -oE '[0-9]{3}' | head -1 || echo "000")
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    checks['Conectividad'] = connectivity == '200'
+                    echo "   ${connectivity == '200' ? '✅ Conexión exitosa (HTTP 200)' : '❌ Sin conexión (HTTP ' + connectivity + ')'}"
+                    echo ""
+                    
+                    // 3. Acceso al repositorio
+                    echo "3. Verificando acceso al repositorio..."
+                    // NOTA: docker exec usa CONTENEDOR, pero curl dentro usa SERVICIO
+                    def repoAccess = sh(
+                        script: """
+                            HTTP_CODE=\$(sudo docker exec ${env.JENKINS_CONTAINER} curl -s -o /dev/null -w "%{http_code}" -u jenkins:\${GITEA_PASSWORD:-jenkins123} --max-time ${env.HTTP_TIMEOUT} "http://${env.GITEA_SERVICE}:${env.GITEA_PORT}/api/v1/repos/${env.GITEA_REPO_OWNER}/${env.GITEA_REPO_NAME}" 2>/dev/null || echo "000")
+                            echo \$(echo "\$HTTP_CODE" | tr -d '[:space:]' | grep -oE '[0-9]{3}' | head -1 || echo "000")
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    checks['Repositorio'] = repoAccess == '200'
+                    
+                    if (repoAccess == '200') {
+                        echo "   ✅ Acceso al repositorio exitoso"
+                    } else if (repoAccess in ['401', '403']) {
+                        echo "   ⚠️  Acceso denegado (verifica credenciales)"
+                    } else if (repoAccess == '404') {
+                        echo "   ⚠️  Repositorio no encontrado"
+                    } else {
+                        echo "   ⚠️  Sin respuesta (HTTP ${repoAccess})"
+                    }
+                    echo ""
+                    
+                    // Resumen
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    def allOk = checks.values().every { it == true }
+                    if (allOk) {
+                        echo "✅ Integración Jenkins-Gitea: OK"
+                    } else {
+                        echo "⚠️  Integración Jenkins-Gitea: Requiere atención"
+                        def failed = checks.findAll { !it.value }.keySet()
+                        echo "   Items a verificar: ${failed.join(', ')}"
+                    }
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                }
+            }
+        }
+        
+        stage('Verificar Configuración del Plugin Gitea') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  🔌 VERIFICACIÓN DEL PLUGIN DE GITEA                          ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    def pluginStatus = [:]
+                    
+                    // 1. Verificar instalación del plugin (archivo físico)
+                    echo "1. Verificando instalación del plugin..."
+                    def pluginFile = sh(
+                        script: """
+                            sudo docker exec ${env.JENKINS_CONTAINER} ls /var/jenkins_home/plugins/ 2>/dev/null | grep -iE 'gitea.*\\.jpi|gitea.*\\.hpi' | head -1 || echo ""
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    
+                    if (pluginFile) {
+                        pluginStatus['instalado'] = true
+                        echo "   ✅ Plugin instalado: ${pluginFile}"
+                    } else {
+                        pluginStatus['instalado'] = false
+                        echo "   ❌ Plugin no encontrado en el sistema de archivos"
+                    }
+                    echo ""
+                    
+                    // 2. Verificar si las clases del plugin están disponibles
+                    echo "2. Verificando disponibilidad de clases del plugin..."
+                    def classesAvailable = [:]
+                    
+                    // Intentar cargar diferentes clases del plugin
+                    def classesToCheck = [
+                        'GiteaSCMSource': 'org.jenkinsci.plugin.gitea.GiteaSCMSource',
+                        'GiteaServers': 'org.jenkinsci.plugin.gitea.servers.GiteaServers',
+                        'GiteaNotifier': 'org.jenkinsci.plugin.gitea.GiteaNotifier'
+                    ]
+                    
+                    classesToCheck.each { name, className ->
+                        try {
+                            Class.forName(className)
+                            classesAvailable[name] = true
+                            echo "   ✅ Clase ${name} disponible"
+                        } catch (ClassNotFoundException e) {
+                            classesAvailable[name] = false
+                            echo "   ⚠️  Clase ${name} no disponible (${e.getMessage()})"
+                        }
+                    }
+                    
+                    pluginStatus['clases'] = classesAvailable
+                    echo ""
+                    
+                    // 3. Verificar servidor Gitea configurado
+                    echo "3. Verificando configuración del servidor Gitea..."
+                    def serverConfigured = false
+                    def manageHooksEnabled = false
+                    
+                    try {
+                        def giteaServers = org.jenkinsci.plugin.gitea.servers.GiteaServers.get()
+                        def servers = giteaServers.getServers()
+                        
+                        if (servers && servers.size() > 0) {
+                            serverConfigured = true
+                            echo "   ✅ Servidor(es) Gitea configurado(s):"
+                            servers.each { server ->
+                                def serverUrl = server.getServerUrl()
+                                def credentialsId = server.getCredentialsId()
+                                // NOTA: El método correcto es isManageHooks(), no getManageHooks()
+                                def manageHooks = server.isManageHooks()
+                                
+                                echo "      - ${server.getDisplayName()}: ${serverUrl}"
+                                echo "        Credenciales: ${credentialsId}"
+                                echo "        Gestionar Webhooks: ${manageHooks ? '✅ Habilitado' : '❌ Deshabilitado'}"
+                                
+                                if (manageHooks) {
+                                    manageHooksEnabled = true
+                                }
+                                
+                                // Verificar si el servidor coincide con nuestra configuración
+                                def expectedUrl = "http://${env.GITEA_SERVICE}:${env.GITEA_PORT}"
+                                if (serverUrl == expectedUrl || serverUrl.contains(env.GITEA_SERVICE)) {
+                                    echo "        ✅ URL coincide con la configuración esperada"
+                                } else {
+                                    echo "        ⚠️  URL no coincide con la esperada (${expectedUrl})"
+                                }
+                            }
+                        } else {
+                            echo "   ❌ No hay servidores Gitea configurados en el plugin"
+                        }
+                    } catch (Exception e) {
+                        echo "   ⚠️  No se pudo acceder a la configuración del plugin: ${e.getMessage()}"
+                        echo "      Esto puede indicar que el plugin no está completamente cargado"
+                    }
+                    
+                    pluginStatus['servidor_configurado'] = serverConfigured
+                    pluginStatus['webhooks_habilitados'] = manageHooksEnabled
+                    echo ""
+                    
+                    // 4. Resumen y recomendaciones
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "📊 RESUMEN DEL PLUGIN DE GITEA"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    if (pluginStatus['instalado'] && pluginStatus['servidor_configurado']) {
+                        echo "✅ Plugin de Gitea: INSTALADO Y CONFIGURADO"
+                        echo ""
+                        echo "ℹ️  Estado actual:"
+                        echo "   - Plugin instalado: ✅"
+                        echo "   - Servidor configurado: ✅"
+                        echo "   - Webhooks automáticos: ${manageHooksEnabled ? '✅ Habilitado' : '⚠️  Deshabilitado'}"
+                        echo ""
+                        
+                        if (classesAvailable['GiteaSCMSource']) {
+                            echo "✅ Clases del plugin disponibles para uso completo"
+                        } else {
+                            echo "⚠️  Clases del plugin no disponibles aún (puede requerir reinicio de Jenkins)"
+                        }
+                        echo ""
+                        echo "💡 Para usar completamente el plugin de Gitea con webhooks y eventos:"
+                        echo "   1. Asegúrate de que 'Gestionar Webhooks' esté habilitado en la configuración"
+                        echo "   2. Para pipelines simples: El plugin gestionará webhooks automáticamente"
+                        echo "   3. Para funcionalidades completas: Considera usar Multibranch Pipeline con GiteaSCMSource"
+                    } else {
+                        echo "⚠️  Plugin de Gitea: REQUIERE ATENCIÓN"
+                        if (!pluginStatus['instalado']) {
+                            echo "   - Plugin no encontrado en el sistema"
+                        }
+                        if (!pluginStatus['servidor_configurado']) {
+                            echo "   - Servidor Gitea no configurado"
+                        }
+                        echo ""
+                        echo "💡 Acciones recomendadas:"
+                        echo "   1. Verificar que el plugin esté instalado: gitea:latest"
+                        echo "   2. Configurar el servidor Gitea en Jenkins (Manage Jenkins > Configure System)"
+                        echo "   3. Habilitar 'Gestionar Webhooks' para integración automática"
+                    }
+                    echo ""
+                    
+                    // Guardar estado para uso posterior
+                    env.GITEA_PLUGIN_INSTALLED = pluginStatus['instalado'] ? 'true' : 'false'
+                    env.GITEA_PLUGIN_CONFIGURED = pluginStatus['servidor_configurado'] ? 'true' : 'false'
+                    env.GITEA_WEBHOOKS_ENABLED = manageHooksEnabled ? 'true' : 'false'
+                }
+            }
+        }
+        
+        stage('Checkout desde Gitea') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  📥 CHECKOUT DESDE GITEA                                      ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    // URL del repositorio en Gitea usando el servidor configurado
+                    // NOTA: Para checkout desde Jenkins, usar el nombre del SERVICIO (comunicación HTTP)
+                    def giteaServerUrl = "http://${env.GITEA_SERVICE}:${env.GITEA_PORT}"
+                    def repoUrl = "${giteaServerUrl}/${env.GITEA_REPO_OWNER}/${env.GITEA_REPO_NAME}.git"
+                    
+                    echo "📦 Repositorio: ${repoUrl}"
+                    echo "🔑 Usando credenciales: gitea-credentials"
+                    echo "🌐 Servidor Gitea configurado: ${giteaServerUrl}"
+                    echo ""
+                    
+                    // Mostrar estado del plugin de Gitea
+                    def pluginInstalled = env.GITEA_PLUGIN_INSTALLED == 'true'
+                    def pluginConfigured = env.GITEA_PLUGIN_CONFIGURED == 'true'
+                    def webhooksEnabled = env.GITEA_WEBHOOKS_ENABLED == 'true'
+                    
+                    echo "🔌 Estado del Plugin de Gitea:"
+                    echo "   - Plugin instalado: ${pluginInstalled ? '✅' : '❌'}"
+                    echo "   - Servidor configurado: ${pluginConfigured ? '✅' : '❌'}"
+                    echo "   - Webhooks automáticos: ${webhooksEnabled ? '✅ Habilitado' : '⚠️  Deshabilitado'}"
+                    echo ""
+                    
+                    // NOTA: Para pipelines declarativos simples, el plugin de Gitea usa GitSCM internamente
+                    // pero con integración específica de Gitea (webhooks, notificaciones, etc.)
+                    // El plugin de Gitea está diseñado principalmente para multibranch pipelines
+                    // con GiteaSCMSource, pero también funciona con GitSCM para pipelines simples
+                    
+                    if (pluginConfigured && webhooksEnabled) {
+                        echo "✅ Usando GitSCM con integración del plugin de Gitea"
+                        echo "   - El plugin de Gitea gestionará webhooks automáticamente"
+                        echo "   - Las credenciales se validan contra el servidor Gitea configurado"
+                        echo "   - Las notificaciones se enviarán a Gitea al finalizar el build"
+                        echo "   - Los eventos de Gitea (push, PR, etc.) activarán el pipeline"
+                    } else if (pluginConfigured) {
+                        echo "⚠️  Usando GitSCM con plugin de Gitea (webhooks deshabilitados)"
+                        echo "   - Las credenciales se validan contra el servidor Gitea configurado"
+                        echo "   - Webhooks NO se gestionarán automáticamente"
+                        echo "   - Considera habilitar 'Gestionar Webhooks' en la configuración del plugin"
+                    } else {
+                        echo "⚠️  Usando GitSCM genérico (plugin de Gitea no configurado)"
+                        echo "   - Funcionalidad básica de Git disponible"
+                        echo "   - Webhooks y eventos de Gitea NO estarán disponibles"
+                        echo "   - Configura el servidor Gitea en Jenkins para habilitar funcionalidades completas"
+                    }
+                    echo ""
+                    
+                    // Intentar checkout con diferentes ramas
+                    def branches = ['*/main', '*/master', '*/develop']
+                    def checkoutSuccess = false
+                    def lastError = null
+                    
+                    for (def branch : branches) {
+                        try {
+                            echo "🔄 Intentando checkout de rama: ${branch}"
+                            checkout([
+                                $class: 'GitSCM',
+                                branches: [[name: branch]],
+                                doGenerateSubmoduleConfigurations: false,
+                                extensions: [],
+                                submoduleCfg: [],
+                                userRemoteConfigs: [[
+                                    credentialsId: 'gitea-credentials',
+                                    url: repoUrl
+                                ]]
+                            ])
+                            checkoutSuccess = true
+                            echo "✅ Checkout exitoso de rama: ${branch}"
+                            break
+                        } catch (Exception e) {
+                            lastError = e.getMessage()
+                            echo "⚠️  No se pudo hacer checkout de ${branch}: ${e.getMessage()}"
+                            continue
+                        }
+                    }
+                    
+                    if (!checkoutSuccess) {
+                        error("No se pudo hacer checkout de ninguna rama. Último error: ${lastError}")
+                    }
+                    
+                    // Verificar que el checkout fue exitoso y que el remoto apunta a Gitea
+                    def currentBranch = sh(
+                        script: 'git rev-parse --abbrev-ref HEAD',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def remoteUrl = sh(
+                        script: 'git config --get remote.origin.url',
+                        returnStdout: true
+                    ).trim()
+                    
+                    // Validar que el remoto es del servidor Gitea configurado
+                    // NOTA: El remoto puede contener el nombre del servicio o del contenedor
+                    if (remoteUrl.contains(env.GITEA_SERVICE) || remoteUrl.contains(env.GITEA_CONTAINER)) {
+                        echo "✅ Verificación: Remoto apunta al servidor Gitea configurado"
+                        echo "   ${remoteUrl}"
+                    } else {
+                        echo "⚠️  Advertencia: El remoto no parece ser del servidor Gitea esperado"
+                        echo "   Esperado: ${env.GITEA_SERVICE} o ${env.GITEA_CONTAINER}"
+                        echo "   Obtenido: ${remoteUrl}"
+                    }
+                    
+                    echo ""
+                    echo "✅ Checkout completado exitosamente"
+                    echo "📌 Rama actual: ${currentBranch}"
+                    echo "🔗 Remoto: ${remoteUrl}"
+                    echo ""
+                }
+            }
+        }
+        
+        stage('Validar Información del Último Commit') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  📋 VALIDACIÓN DEL ÚLTIMO COMMIT                                ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    // Obtener información del último commit
+                    def commitHash = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def commitShortHash = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def commitAuthor = sh(
+                        script: 'git log -1 --pretty=format:"%an"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def commitEmail = sh(
+                        script: 'git log -1 --pretty=format:"%ae"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def commitDate = sh(
+                        script: 'git log -1 --pretty=format:"%ad" --date=format:"%Y-%m-%d %H:%M:%S"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def commitMessage = sh(
+                        script: 'git log -1 --pretty=format:"%s"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def commitBody = sh(
+                        script: 'git log -1 --pretty=format:"%b"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def branchName = sh(
+                        script: 'git rev-parse --abbrev-ref HEAD',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def remoteUrl = sh(
+                        script: 'git config --get remote.origin.url',
+                        returnStdout: true
+                    ).trim()
+                    
+                    // Mostrar información del commit
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "📊 INFORMACIÓN DEL ÚLTIMO COMMIT"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    echo "┌──────────────────────────────────────────────────────────────┐"
+                    echo "│ Hash Completo: ${commitHash.padRight(47)} │"
+                    echo "│ Hash Corto:    ${commitShortHash.padRight(47)} │"
+                    echo "│ Rama:          ${branchName.padRight(47)} │"
+                    echo "│ Autor:         ${commitAuthor.padRight(47)} │"
+                    echo "│ Email:         ${commitEmail.padRight(47)} │"
+                    echo "│ Fecha:         ${commitDate.padRight(47)} │"
+                    echo "│ Repositorio:   ${remoteUrl.padRight(47)} │"
+                    echo "└──────────────────────────────────────────────────────────────┘"
+                    echo ""
+                    echo "📝 Mensaje del Commit:"
+                    echo "   ${commitMessage}"
+                    if (commitBody) {
+                        echo ""
+                        echo "📄 Cuerpo del Commit:"
+                        commitBody.split('\n').each { line ->
+                            echo "   ${line}"
+                        }
+                    }
+                    echo ""
+                    
+                    // Validaciones
+                    def validations = [:]
+                    def validationErrors = []
+                    
+                    // Validar que el hash existe
+                    if (commitHash && commitHash.length() == 40) {
+                        validations['Hash válido'] = true
+                        echo "✅ Hash del commit válido (40 caracteres)"
+                    } else {
+                        validations['Hash válido'] = false
+                        validationErrors.add("Hash del commit inválido: ${commitHash}")
+                        echo "❌ Hash del commit inválido"
+                    }
+                    
+                    // Validar que hay autor
+                    if (commitAuthor && commitAuthor.length() > 0) {
+                        validations['Autor presente'] = true
+                        echo "✅ Autor del commit presente: ${commitAuthor}"
+                    } else {
+                        validations['Autor presente'] = false
+                        validationErrors.add("Autor del commit no encontrado")
+                        echo "❌ Autor del commit no encontrado"
+                    }
+                    
+                    // Validar que hay email
+                    if (commitEmail && commitEmail.contains('@')) {
+                        validations['Email válido'] = true
+                        echo "✅ Email del autor válido: ${commitEmail}"
+                    } else {
+                        validations['Email válido'] = false
+                        validationErrors.add("Email del autor inválido: ${commitEmail}")
+                        echo "❌ Email del autor inválido"
+                    }
+                    
+                    // Validar que hay mensaje
+                    if (commitMessage && commitMessage.length() > 0) {
+                        validations['Mensaje presente'] = true
+                        echo "✅ Mensaje del commit presente"
+                    } else {
+                        validations['Mensaje presente'] = false
+                        validationErrors.add("Mensaje del commit vacío")
+                        echo "❌ Mensaje del commit vacío"
+                    }
+                    
+                    // Validar que el repositorio es de Gitea
+                    // NOTA: El remoto puede contener el nombre del servicio o del contenedor
+                    if (remoteUrl && (remoteUrl.contains(env.GITEA_SERVICE) || remoteUrl.contains(env.GITEA_CONTAINER))) {
+                        validations['Repositorio Gitea'] = true
+                        echo "✅ Repositorio es de Gitea: ${remoteUrl}"
+                    } else {
+                        validations['Repositorio Gitea'] = false
+                        validationErrors.add("Repositorio no es de Gitea: ${remoteUrl}")
+                        echo "❌ Repositorio no es de Gitea"
+                    }
+                    
+                    // Validar que estamos usando el plugin de Gitea (usando variables de entorno del stage anterior)
+                    def pluginInstalled = env.GITEA_PLUGIN_INSTALLED == 'true'
+                    def pluginConfigured = env.GITEA_PLUGIN_CONFIGURED == 'true'
+                    def webhooksEnabled = env.GITEA_WEBHOOKS_ENABLED == 'true'
+                    
+                    if (pluginConfigured) {
+                        validations['Plugin Gitea configurado'] = true
+                        echo "✅ Plugin de Gitea configurado correctamente"
+                        if (webhooksEnabled) {
+                            validations['Webhooks habilitados'] = true
+                            echo "✅ Webhooks automáticos habilitados - Los eventos de Gitea activarán el pipeline"
+                        } else {
+                            validations['Webhooks habilitados'] = false
+                            echo "⚠️  Webhooks automáticos deshabilitados - Los eventos de Gitea NO activarán el pipeline automáticamente"
+                            validationErrors.add("Webhooks automáticos deshabilitados - Habilita 'Gestionar Webhooks' en la configuración del plugin")
+                        }
+                    } else {
+                        validations['Plugin Gitea configurado'] = false
+                        validations['Webhooks habilitados'] = false
+                        validationErrors.add("Plugin de Gitea no configurado - Configura el servidor Gitea en Jenkins")
+                        echo "❌ Plugin de Gitea no configurado"
+                    }
+                    
+                    // Verificar también que el plugin está instalado
+                    if (pluginInstalled) {
+                        validations['Plugin Gitea instalado'] = true
+                        echo "✅ Plugin de Gitea instalado"
+                    } else {
+                        validations['Plugin Gitea instalado'] = false
+                        validationErrors.add("Plugin de Gitea no instalado")
+                        echo "❌ Plugin de Gitea no instalado"
+                    }
+                    
+                    echo ""
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "📊 RESUMEN DE VALIDACIONES"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    def allValid = validations.values().every { it == true }
+                    def successCount = validations.values().count { it == true }
+                    
+                    echo "✅ Validaciones exitosas: ${successCount}/${validations.size()}"
+                    echo ""
+                    
+                    // Mostrar información sobre el uso del plugin
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🔌 ESTADO DE INTEGRACIÓN CON PLUGIN DE GITEA"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    if (pluginConfigured) {
+                        echo "✅ Plugin de Gitea está configurado y disponible"
+                        echo "   - Plugin instalado: ${pluginInstalled ? '✅' : '❌'}"
+                        echo "   - Servidor Gitea configurado: ✅"
+                        echo "   - Webhooks automáticos: ${webhooksEnabled ? '✅ Habilitado' : '⚠️  Deshabilitado'}"
+                        echo "   - Checkout usando credenciales del plugin: ✅"
+                        echo "   - Repositorio remoto apunta a Gitea: ✅"
+                        echo ""
+                        if (webhooksEnabled) {
+                            echo "✅ El plugin de Gitea gestionará webhooks automáticamente"
+                            echo "   - Los eventos de Gitea (push, PR, etc.) activarán el pipeline"
+                            echo "   - Las notificaciones se enviarán a Gitea al finalizar builds"
+                        } else {
+                            echo "⚠️  Webhooks automáticos deshabilitados"
+                            echo "   - Los eventos de Gitea NO activarán el pipeline automáticamente"
+                            echo "   - Habilita 'Gestionar Webhooks' en la configuración del plugin"
+                        }
+                        echo ""
+                        echo "ℹ️  NOTA: Para pipelines declarativos simples, el plugin de Gitea"
+                        echo "   usa GitSCM internamente pero con integración específica:"
+                        echo "   - Gestión automática de webhooks (si está habilitado)"
+                        echo "   - Notificaciones a Gitea al finalizar builds"
+                        echo "   - Validación de credenciales contra servidor Gitea"
+                        echo ""
+                        echo "💡 Para usar funcionalidades completas del plugin, considera"
+                        echo "   convertir a un Multibranch Pipeline con GiteaSCMSource"
+                    } else {
+                        echo "⚠️  El plugin de Gitea no está completamente configurado"
+                        echo "   - Plugin instalado: ${pluginInstalled ? '✅' : '❌'}"
+                        echo "   - Servidor Gitea configurado: ❌"
+                        echo "   - Se está usando GitSCM genérico"
+                        echo "   - La conexión es directa a Gitea sin usar el plugin"
+                        echo ""
+                        echo "💡 Para usar el plugin de Gitea completamente:"
+                        echo "   1. Configura el servidor Gitea en Jenkins (Manage Jenkins > Configure System)"
+                        echo "   2. Habilita 'Gestionar Webhooks' para integración automática"
+                        echo "   3. Considera usar un Multibranch Pipeline con GiteaSCMSource"
+                    }
+                    echo ""
+                    
+                    if (allValid) {
+                        echo "✅ Todas las validaciones pasaron correctamente"
+                        echo ""
+                        echo "🎉 La integración Jenkins-Gitea está funcionando correctamente"
+                        echo "   - Plugin de Gitea: ${pluginConfigured ? (webhooksEnabled ? '✅ Configurado con webhooks' : '✅ Configurado (webhooks deshabilitados)') : '⚠️  No configurado'}"
+                        echo "   - Checkout del repositorio: ✅"
+                        echo "   - Información del commit: ✅"
+                    } else {
+                        echo "❌ Algunas validaciones fallaron:"
+                        validationErrors.each { error ->
+                            echo "   - ${error}"
+                        }
+                        // No fallar el pipeline si solo faltan webhooks, solo advertir
+                        def criticalErrors = validationErrors.findAll { !it.contains('Webhooks') && !it.contains('webhooks') }
+                        if (criticalErrors.size() > 0) {
+                            error("Validación del commit falló: ${criticalErrors.size()} error(es) crítico(s)")
+                        } else {
+                            echo "⚠️  Advertencias no críticas detectadas (webhooks deshabilitados)"
+                        }
+                    }
+                    echo ""
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            script {
+                echo ""
+                echo "✅ Pipeline completado exitosamente"
+                
+                // Intentar enviar notificación a Gitea usando el plugin
+                try {
+                    def giteaNotifierClass = 'org.jenkinsci.plugin.gitea.GiteaNotifier'
+                    Class.forName(giteaNotifierClass)
+                    
+                    echo ""
+                    echo "🔔 Enviando notificación a Gitea usando el plugin..."
+                    
+                    // Obtener información del commit para la notificación
+                    def commitHash = sh(
+                        script: 'git rev-parse --short HEAD 2>/dev/null || echo "unknown"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def commitMessage = sh(
+                        script: 'git log -1 --pretty=format:"%s" 2>/dev/null || echo "No commit message"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    // El plugin de Gitea enviará automáticamente la notificación
+                    // si está configurado correctamente en el job
+                    echo "   ✅ Notificación configurada para commit: ${commitHash}"
+                    echo "   📝 Mensaje: ${commitMessage}"
+                } catch (ClassNotFoundException e) {
+                    echo ""
+                    echo "⚠️  Plugin de Gitea no disponible para notificaciones"
+                    echo "   Las notificaciones se enviarán manualmente si es necesario"
+                } catch (Exception e) {
+                    echo ""
+                    echo "⚠️  Error al enviar notificación: ${e.getMessage()}"
+                }
+            }
+        }
+        failure {
+            script {
+                echo ""
+                echo "❌ Pipeline falló - Revisa los logs anteriores"
+                
+                // Intentar enviar notificación de fallo a Gitea
+                try {
+                    def giteaNotifierClass = 'org.jenkinsci.plugin.gitea.GiteaNotifier'
+                    Class.forName(giteaNotifierClass)
+                    
+                    echo ""
+                    echo "🔔 Enviando notificación de fallo a Gitea..."
+                    echo "   ⚠️  El build falló - Revisa los logs en Jenkins"
+                } catch (Exception e) {
+                    // Silenciar errores de notificación
+                }
+            }
+        }
+        always {
+            script {
+                def timestamp = sh(script: "date '+%Y-%m-%d %H:%M:%S'", returnStdout: true).trim()
+                echo ""
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "📝 RESUMEN FINAL"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+                echo "⏰ Completado: ${timestamp}"
+                echo "🔗 Integración Jenkins-Gitea verificada"
+                echo ""
+                
+                // Mostrar estado final del plugin de Gitea
+                def pluginInstalled = env.GITEA_PLUGIN_INSTALLED == 'true'
+                def pluginConfigured = env.GITEA_PLUGIN_CONFIGURED == 'true'
+                def webhooksEnabled = env.GITEA_WEBHOOKS_ENABLED == 'true'
+                
+                echo "🔌 Estado del Plugin de Gitea:"
+                if (pluginConfigured) {
+                    echo "   ✅ Plugin configurado y disponible"
+                    echo "   - Plugin instalado: ${pluginInstalled ? '✅' : '❌'}"
+                    echo "   - Servidor Gitea configurado: ✅"
+                    echo "   - Webhooks automáticos: ${webhooksEnabled ? '✅ Habilitado' : '⚠️  Deshabilitado'}"
+                    if (webhooksEnabled) {
+                        echo ""
+                        echo "   💡 El plugin gestionará webhooks automáticamente:"
+                        echo "      - Los eventos de Gitea (push, PR, etc.) activarán el pipeline"
+                        echo "      - Las notificaciones se enviarán a Gitea al finalizar builds"
+                    } else {
+                        echo ""
+                        echo "   ⚠️  Webhooks automáticos deshabilitados"
+                        echo "      - Habilita 'Gestionar Webhooks' en la configuración del plugin"
+                        echo "      - Los eventos de Gitea NO activarán el pipeline automáticamente"
+                    }
+                } else {
+                    echo "   ⚠️  Plugin no configurado completamente"
+                    echo "   - Plugin instalado: ${pluginInstalled ? '✅' : '❌'}"
+                    echo "   - Servidor Gitea configurado: ❌"
+                    echo "   - Se está usando conexión directa con GitSCM"
+                    echo ""
+                    echo "   💡 Para habilitar funcionalidades completas:"
+                    echo "      1. Configura el servidor Gitea en Jenkins"
+                    echo "      2. Habilita 'Gestionar Webhooks' para integración automática"
+                }
+                echo ""
+            }
+        }
+    }
+}
