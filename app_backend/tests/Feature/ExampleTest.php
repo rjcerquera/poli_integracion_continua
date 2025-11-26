@@ -14,6 +14,8 @@ class ExampleTest extends TestCase
     {
         $response = $this->get('/');
 
-        $response->assertStatus(200);
+        // La ruta raíz redirige a la documentación de la API
+        $response->assertStatus(302)
+            ->assertRedirect('/api/documentation');
     }
 }

@@ -10,10 +10,14 @@ RUN apt-get update && apt-get install -y \
     libzip-dev \
     zip \
     unzip \
+    $PHPIZE_DEPS \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Instalar extensiones de PHP
 RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip
+
+# Instalar PCOV para cobertura de código (más rápido que Xdebug)
+RUN pecl install pcov && docker-php-ext-enable pcov
 
 # Instalar Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
@@ -27,8 +31,9 @@ COPY ./app_backend /var/www
 # Copiar el archivo de entorno
 COPY ./app_backend/.env.example /var/www/.env
 
-# Instalar/Actualizar dependencias de Composer
-RUN composer update --no-dev --optimize-autoloader --no-interaction
+# Instalar/Actualizar dependencias de Composer (incluyendo dev para pruebas)
+# Usar update para regenerar lock file si está desactualizado
+RUN composer update --optimize-autoloader --no-interaction
 
 # Generar APP_KEY
 RUN php artisan key:generate --force
