@@ -1,0 +1,70 @@
+# Dockerfile optimizado para testing de Laravel
+# Este Dockerfile se usa exclusivamente para ejecutar pruebas en el pipeline de CI/CD
+# Utiliza el patrón Docker-out-of-Docker (DooD) desde Jenkins
+
+FROM php:8.2-cli
+
+# Instalar dependencias del sistema necesarias para testing
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    libzip-dev \
+    zip \
+    unzip \
+    sqlite3 \
+    libsqlite3-dev \
+    $PHPIZE_DEPS \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Instalar extensiones de PHP necesarias para Laravel y testing
+RUN docker-php-ext-install pdo_mysql pdo_sqlite mbstring exif pcntl bcmath gd zip
+
+# Instalar PCOV para cobertura de código (más rápido que Xdebug)
+RUN pecl install pcov && docker-php-ext-enable pcov
+
+# Instalar Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Configurar directorio de trabajo
+WORKDIR /var/www
+
+# Copiar archivos de composer primero (para aprovechar cache de Docker)
+COPY ./app_backend/composer.json ./app_backend/composer.lock* ./
+
+# Instalar dependencias (incluyendo dev dependencies para testing)
+RUN composer install --optimize-autoloader --no-interaction --prefer-dist
+
+# Copiar el resto de la aplicación Laravel
+COPY ./app_backend /var/www
+
+# Copiar archivo de entorno de ejemplo para testing
+COPY ./app_backend/.env.example /var/www/.env
+
+# Configurar permisos
+RUN chown -R www-data:www-data /var/www \
+    && chmod -R 775 /var/www/storage \
+    && chmod -R 775 /var/www/bootstrap/cache
+
+# Generar APP_KEY (necesario para algunas funcionalidades de Laravel)
+RUN php artisan key:generate --force || true
+
+# Pre-cachear configuración y rutas (opcional, mejora performance)
+RUN php artisan config:cache || true
+RUN php artisan route:cache || true
+
+# Configurar PCOV para cobertura de código
+ENV PCOV_ENABLED=1
+ENV PCOV_EXCLUDE='vendor,storage,node_modules'
+
+# Configurar variables de entorno para testing
+ENV APP_ENV=testing
+ENV DB_CONNECTION=sqlite
+ENV DB_DATABASE=:memory:
+
+# Comando por defecto: mostrar versión de PHPUnit (para verificación)
+# El comando real se ejecuta desde el script de pruebas
+CMD ["./vendor/bin/phpunit", "--version"]
+
