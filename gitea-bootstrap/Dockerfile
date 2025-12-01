@@ -19,6 +19,17 @@ RUN apk add --no-cache \
 COPY init-gitea-complete.sh /usr/local/bin/init-gitea-complete.sh
 RUN chmod +x /usr/local/bin/init-gitea-complete.sh
 
-# Ejecutar script completo
-CMD ["/usr/local/bin/init-gitea-complete.sh"]
+# Script wrapper que ejecuta la inicialización y luego mantiene el contenedor activo
+RUN echo '#!/bin/sh' > /usr/local/bin/entrypoint.sh && \
+    echo '/usr/local/bin/init-gitea-complete.sh' >> /usr/local/bin/entrypoint.sh && \
+    echo 'echo ""' >> /usr/local/bin/entrypoint.sh && \
+    echo 'echo "✅ Inicialización completada. El contenedor permanecerá activo."' >> /usr/local/bin/entrypoint.sh && \
+    echo 'echo "💡 Para hacer push manual, ejecuta: docker exec -it gitea_bootstrap sh"' >> /usr/local/bin/entrypoint.sh && \
+    echo 'echo ""' >> /usr/local/bin/entrypoint.sh && \
+    echo '# Mantener el contenedor activo indefinidamente' >> /usr/local/bin/entrypoint.sh && \
+    echo 'exec tail -f /dev/null' >> /usr/local/bin/entrypoint.sh && \
+    chmod +x /usr/local/bin/entrypoint.sh
+
+# Ejecutar script wrapper que mantiene el contenedor activo
+CMD ["/usr/local/bin/entrypoint.sh"]
 

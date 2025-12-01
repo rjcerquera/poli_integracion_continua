@@ -1,6 +1,6 @@
 # 🚀 Jenkins CI/CD Configuration
 
-Esta carpeta contiene la configuración personalizada de Jenkins con plugins pre-instalados, configuración automatizada mediante JCasC, y un pipeline de health check completo.
+Esta carpeta contiene la configuración personalizada de Jenkins con plugins pre-instalados, configuración automatizada mediante JCasC, y pipelines automatizados para CI/CD. Incluye dos pipelines principales: uno para webhooks de Gitea y otro para verificación de salud del sistema.
 
 ## 📁 Estructura de Archivos
 
@@ -9,10 +9,16 @@ jenkins/
 ├── Dockerfile              # Imagen personalizada de Jenkins
 ├── plugins.txt             # Lista de plugins a instalar
 ├── jenkins.yaml            # Configuración as Code (JCasC)
-├── Jenkinsfile             # Pipeline de health check y verificación
+├── Jenkinsfile             # Pipeline legacy (puede ser removido)
 ├── env.example             # Variables de entorno de ejemplo
 ├── init-scripts/           # Scripts de inicialización Groovy
-│   └── createPipeline.groovy  # Script para crear pipeline automáticamente
+│   └── createPipeline.groovy  # Script para crear pipelines automáticamente
+├── pipelines/              # Pipelines organizados por funcionalidad
+│   ├── README.md          # Documentación de pipelines
+│   ├── webhook-pipeline/  # Pipeline activado por webhooks de Gitea
+│   │   └── Jenkinsfile
+│   └── health-check-pipeline/  # Pipeline de verificación del sistema
+│       └── Jenkinsfile
 └── README.md              # Este archivo
 ```
 
@@ -21,10 +27,12 @@ jenkins/
 ### 1. **Dockerfile**
 - Basado en `jenkins/jenkins:lts`
 - Instala Docker CLI para DooD (Docker-out-of-Docker)
+- Instala Docker Compose Plugin v2 (compatible con Docker 26.1.5+)
 - Instala plugins automáticamente desde `plugins.txt`
 - Configura credenciales parametrizables
 - Configura JCasC para configuración automática
-- Copia Jenkinsfile y scripts de inicialización
+- Copia la carpeta `pipelines/` completa a `/var/jenkins_home/pipelines/`
+- Copia scripts de inicialización a `/var/jenkins_home/init.groovy.d/`
 - Incluye healthcheck
 
 ### 2. **plugins.txt**
@@ -44,19 +52,34 @@ Configuración automática de Jenkins usando JCasC:
 - Credenciales para Gitea (usuario/contraseña)
 - Configuración de herramientas (Git)
 - Servidor Gitea configurado con webhooks habilitados
+- Configuración de SMTP (MailHog) para notificaciones por email
 - Timezone y timestamps
 
-### 4. **Jenkinsfile**
-Pipeline completo de health check que:
-- Verifica conectividad de todos los contenedores
-- Verifica integración Jenkins-Gitea
-- Verifica configuración del plugin de Gitea
-- Realiza checkout desde Gitea
-- Valida información del último commit
-- Muestra estado detallado de la integración
+### 4. **pipelines/**
+Directorio que contiene los pipelines de Jenkins organizados por funcionalidad. Cada pipeline tiene su propia carpeta con su `Jenkinsfile`:
 
-### 5. **init-scripts/createPipeline.groovy**
-Script de inicialización que crea automáticamente el pipeline `health-check-pipeline` al iniciar Jenkins.
+- **webhook-pipeline/**: Pipeline que se activa automáticamente mediante webhooks de Gitea
+  - Utiliza Generic Webhook Trigger para recibir eventos de Gitea
+  - Construye y prueba la aplicación Laravel
+  - Envía notificaciones por email usando MailHog
+  - Ubicación: `pipelines/webhook-pipeline/Jenkinsfile`
+
+- **health-check-pipeline/**: Pipeline de verificación de salud del sistema
+  - Verifica conectividad de todos los contenedores
+  - Verifica integración Jenkins-Gitea
+  - Verifica configuración del plugin de Gitea
+  - Realiza checkout desde Gitea
+  - Valida información del último commit
+  - Muestra estado detallado de la integración
+  - Ubicación: `pipelines/health-check-pipeline/Jenkinsfile`
+
+Para más detalles sobre los pipelines, consulta [pipelines/README.md](pipelines/README.md).
+
+### 5. **Jenkinsfile** (en la raíz)
+Pipeline legacy que puede ser removido. Los pipelines activos están en la carpeta `pipelines/`. Este archivo puede ser una versión anterior del health-check-pipeline.
+
+### 6. **init-scripts/createPipeline.groovy**
+Script de inicialización que crea automáticamente los pipelines al iniciar Jenkins. Lee los Jenkinsfiles desde `pipelines/` y crea los jobs correspondientes.
 
 ## 🐳 Docker-out-of-Docker (DooD) - Configuración Actual
 
@@ -159,6 +182,11 @@ jenkins:
 
 1. Copiar `env.example` a `.env` en la raíz del proyecto:
    ```bash
+   cp env.example .env
+   ```
+   
+   O si prefieres usar el ejemplo de Jenkins:
+   ```bash
    cp jenkins/env.example .env
    ```
 
@@ -221,8 +249,12 @@ Usuario: admin (o el configurado en .env)
 Password: admin123 (o el configurado en .env)
 ```
 
-### **Pipeline automático:**
-El script `createPipeline.groovy` crea automáticamente el pipeline `health-check-pipeline` al iniciar Jenkins. Puedes ejecutarlo desde la UI de Jenkins.
+### **Pipelines automáticos:**
+El script `init-scripts/createPipeline.groovy` crea automáticamente los siguientes pipelines al iniciar Jenkins:
+- `webhook-pipeline`: Se activa mediante webhooks de Gitea
+- `health-check-pipeline`: Verifica el estado del sistema
+
+Los pipelines se leen desde `/var/jenkins_home/pipelines/` y se crean como jobs en Jenkins. Puedes verificar su creación en los logs de Jenkins o desde la UI.
 
 ## 🔄 Actualizar Plugins
 
@@ -239,7 +271,7 @@ El script `createPipeline.groovy` crea automáticamente el pipeline `health-chec
 - `gitea` - Plugin oficial de Gitea (webhooks, notificaciones, GiteaSCMSource)
 - `git` - Soporte básico de Git
 - `git-client` - Cliente Git avanzado
-- `generic-webhook-trigger` - Webhooks personalizables
+- `generic-webhook-trigger` - Webhooks personalizables (usado en webhook-pipeline)
 
 ### **Pipelines**
 - `workflow-aggregator` - Pipeline completo
@@ -255,6 +287,9 @@ El script `createPipeline.groovy` crea automáticamente el pipeline `health-chec
 ### **Configuración**
 - `configuration-as-code` - JCasC (Configuración como código)
 - `job-dsl` - Crear jobs programáticamente
+
+### **Notificaciones**
+- `mailer` - Envío de emails (configurado con MailHog)
 
 ### **UI**
 - `blueocean` - Interfaz moderna
@@ -308,15 +343,69 @@ giteaServers:
 ✅ **Validación de credenciales**: Las credenciales se validan contra el servidor Gitea  
 ✅ **Checkout**: El pipeline puede hacer checkout desde Gitea  
 
-### Verificar integración:
+### Pipelines Disponibles
 
-El pipeline `health-check-pipeline` verifica automáticamente:
-- Plugin de Gitea instalado
-- Servidor Gitea configurado
-- Webhooks habilitados
-- Conectividad con Gitea
-- Checkout desde Gitea
-- Validación de commits
+El proyecto incluye dos pipelines principales:
+
+1. **webhook-pipeline**: Se activa automáticamente cuando Gitea envía un webhook
+   - Utiliza Generic Webhook Trigger para recibir eventos
+   - Construye y prueba la aplicación Laravel
+   - Envía notificaciones por email
+   - URL del webhook: `http://jenkins:8080/generic-webhook-trigger/invoke?token=gitea-webhook-token`
+
+2. **health-check-pipeline**: Pipeline de verificación de salud del sistema
+   - Verifica conectividad de todos los contenedores
+   - Verifica integración Jenkins-Gitea
+   - Verifica configuración del plugin de Gitea
+   - Realiza checkout desde Gitea
+   - Valida información del último commit
+
+Para más detalles sobre los pipelines, consulta [pipelines/README.md](pipelines/README.md).
+
+## 📧 Configuración de SMTP (MailHog)
+
+Jenkins está configurado para enviar notificaciones por email usando MailHog, un servidor SMTP de desarrollo que captura todos los emails enviados.
+
+### Configuración en jenkins.yaml
+
+```yaml
+mailer:
+  charset: "UTF-8"
+  smtpHost: "minio"        # Nombre del servicio MailHog en docker-compose
+  smtpPort: "1025"         # Puerto SMTP de MailHog
+  useSsl: false
+  useTls: false
+  defaultSuffix: "@localhost"
+  replyToAddress: "jenkins@localhost"
+```
+
+### Acceder a MailHog
+
+- **Interfaz web**: http://localhost:8025
+- **Servidor SMTP**: `minio:1025` (dentro de la red Docker) o `localhost:1025` (desde el host)
+
+### Variables de Entorno
+
+Las siguientes variables se pueden configurar en `docker-compose.yml` o `.env`:
+
+```env
+SMTP_HOST=minio              # Nombre del servicio MailHog
+SMTP_PORT=1025               # Puerto SMTP
+SMTP_FROM=jenkins@localhost  # Dirección de remitente
+SMTP_TO=admin@example.com    # Dirección de destinatario
+```
+
+### Verificar Emails Enviados
+
+1. Accede a la interfaz web de MailHog: http://localhost:8025
+2. Todos los emails enviados por Jenkins aparecerán en la interfaz
+3. Puedes ver el contenido completo, headers y destinatarios
+
+### Notas Importantes
+
+- MailHog no requiere autenticación (ideal para desarrollo)
+- Los emails no se envían realmente, solo se capturan para pruebas
+- En producción, configura un servidor SMTP real
 
 ## 🐛 Troubleshooting
 
@@ -379,10 +468,46 @@ docker exec jenkins_server cat /var/jenkins_home/casc_configs/jenkins.yaml
 # Verificar que el script de inicialización existe
 docker exec jenkins_server ls /var/jenkins_home/init.groovy.d/
 
+# Verificar que los pipelines están copiados
+docker exec jenkins_server ls -la /var/jenkins_home/pipelines/
+
 # Ver logs de inicialización
 docker logs jenkins_server | grep -i "init\|pipeline"
 
 # Crear pipeline manualmente desde la UI de Jenkins
+```
+
+### **Pipelines no encontrados:**
+```bash
+# Verificar que los pipelines están en el contenedor
+docker exec jenkins_server ls -la /var/jenkins_home/pipelines/
+
+# Verificar estructura de pipelines
+docker exec jenkins_server find /var/jenkins_home/pipelines -name "Jenkinsfile"
+
+# Verificar contenido de un pipeline
+docker exec jenkins_server cat /var/jenkins_home/pipelines/health-check-pipeline/Jenkinsfile | head -20
+```
+
+### **Problemas con MailHog/SMTP:**
+```bash
+# Verificar que MailHog está corriendo
+docker ps | grep mailhog
+
+# Verificar conectividad desde Jenkins a MailHog
+docker exec jenkins_server curl http://minio:8025
+
+# Verificar configuración SMTP en jenkins.yaml
+docker exec jenkins_server cat /var/jenkins_home/casc_configs/jenkins.yaml | grep -A 10 mailer
+```
+
+### **Problemas con Docker Compose:**
+```bash
+# Verificar que Docker Compose v2 está instalado
+docker exec jenkins_server docker compose version
+
+# Verificar que el plugin está en el directorio correcto
+docker exec jenkins_server ls -la /usr/local/lib/docker/cli-plugins/
 ```
 
 ## 📚 Documentación Adicional
@@ -398,9 +523,10 @@ docker logs jenkins_server | grep -i "init\|pipeline"
 1. ✅ Construir imagen de Jenkins
 2. ✅ Verificar acceso a Jenkins UI
 3. ✅ Configurar conexión con Gitea
-4. ✅ Crear primer Pipeline
+4. ✅ Crear pipelines (webhook-pipeline y health-check-pipeline)
 5. ✅ Configurar webhooks en Gitea
-6. ✅ Verificar integración con el pipeline de health check
+6. ✅ Verificar integración con los pipelines
+7. ✅ Configurar notificaciones por email (MailHog)
 
 ## 📝 Notas Importantes
 
@@ -412,13 +538,28 @@ docker logs jenkins_server | grep -i "init\|pipeline"
   - Para conectarse a Gitea: `http://gitea:3000` (nombre del servicio)
   - Para ejecutar comandos: `docker exec gitea_server ...` (nombre del contenedor)
 
-### Pipeline de Health Check
+### Pipelines Disponibles
 
-El `Jenkinsfile` incluido realiza verificaciones completas:
-- Conectividad de contenedores
-- Integración Jenkins-Gitea
-- Configuración del plugin de Gitea
-- Checkout desde Gitea
-- Validación de commits
+El proyecto incluye dos pipelines principales que se crean automáticamente:
 
-Este pipeline se crea automáticamente mediante el script `createPipeline.groovy`.
+1. **webhook-pipeline** (`pipelines/webhook-pipeline/Jenkinsfile`): Se activa mediante webhooks de Gitea
+   - Construye y prueba la aplicación Laravel
+   - Envía notificaciones por email
+   - Utiliza Generic Webhook Trigger
+   - URL del webhook: `http://jenkins:8080/generic-webhook-trigger/invoke?token=gitea-webhook-token`
+
+2. **health-check-pipeline** (`pipelines/health-check-pipeline/Jenkinsfile`): Verifica el estado del sistema
+   - Conectividad de contenedores
+   - Integración Jenkins-Gitea
+   - Configuración del plugin de Gitea
+   - Checkout desde Gitea
+   - Validación de commits
+
+Ambos pipelines se crean automáticamente mediante el script `init-scripts/createPipeline.groovy`, que:
+- Lee los Jenkinsfiles desde `/var/jenkins_home/pipelines/`
+- Crea los jobs correspondientes en Jenkins
+- Configura los triggers y parámetros necesarios
+
+**Nota**: El `Jenkinsfile` en la raíz de `jenkins/` es legacy y puede ser removido. Los pipelines activos están en `pipelines/`.
+
+Para más detalles sobre los pipelines, consulta [pipelines/README.md](pipelines/README.md).

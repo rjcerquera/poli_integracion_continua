@@ -51,6 +51,16 @@ GITEA_JENKINS_EMAIL="${GITEA_JENKINS_EMAIL:-jenkins@example.com}"
 GITEA_AUTO_PUSH="${GITEA_AUTO_PUSH:-true}"
 GITEA_REPO_PATH="${GITEA_REPO_PATH:-/workspace}"
 
+# Configuración para webhook de Jenkins
+# NOTA: JENKINS_HOST debe ser el nombre del SERVICIO en docker-compose (jenkins), no el nombre del contenedor
+JENKINS_HOST="${JENKINS_HOST:-jenkins}"
+JENKINS_PORT="${JENKINS_PORT:-8080}"
+# NOTA: Usar Generic Webhook Trigger endpoint para activar pipelines automáticamente
+#       El endpoint /gitea-webhook/post solo funciona con Multibranch Pipelines
+JENKINS_WEBHOOK_PATH="${JENKINS_WEBHOOK_PATH:-/generic-webhook-trigger/invoke?token=gitea-webhook-token}"
+JENKINS_WEBHOOK_TOKEN="${JENKINS_WEBHOOK_TOKEN:-gitea-webhook-token}"
+GITEA_CREATE_WEBHOOK="${GITEA_CREATE_WEBHOOK:-true}"
+
 # Colores para output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -675,12 +685,105 @@ push_local_repository() {
     fi
 }
 
+# Crear webhook de Jenkins en el repositorio
+create_jenkins_webhook() {
+    local owner=$1
+    local repo=$2
+    local admin_user=$3
+    local admin_password=$4
+    
+    if [ "$GITEA_CREATE_WEBHOOK" = "false" ]; then
+        echo -e "${YELLOW}[Gitea Init]${NC} ℹ️  Creación de webhook deshabilitada (GITEA_CREATE_WEBHOOK=false)"
+        return 0
+    fi
+    
+    echo -e "${YELLOW}[Gitea Init]${NC} Verificando webhook de Jenkins para ${owner}/${repo}..."
+    
+    # URL del webhook (usando el nombre del servicio Jenkins dentro de la red Docker)
+    local webhook_url="http://${JENKINS_HOST}:${JENKINS_PORT}${JENKINS_WEBHOOK_PATH}"
+    
+    echo -e "${YELLOW}[Gitea Init]${NC} URL del webhook: ${webhook_url}"
+    echo -e "${YELLOW}[Gitea Init]${NC} NOTA: Usando nombre de servicio '${JENKINS_HOST}' (comunicación dentro de la red Docker)"
+    
+    # Verificar si el webhook ya existe
+    local existing_hooks=$(curl -s -w "\n%{http_code}" \
+        -u "${admin_user}:${admin_password}" \
+        "${GITEA_URL}/api/v1/repos/${owner}/${repo}/hooks" 2>/dev/null)
+    
+    local http_code=$(echo "$existing_hooks" | tail -n1)
+    
+    if [ "$http_code" = "200" ]; then
+        # Verificar si ya existe un webhook con esta URL
+        local hooks_body=$(echo "$existing_hooks" | sed '$d')
+        if echo "$hooks_body" | grep -q "\"url\":\"${webhook_url}\"" 2>/dev/null; then
+            echo -e "${YELLOW}[Gitea Init]${NC} ⚠ El webhook de Jenkins ya existe para este repositorio."
+            echo -e "${GREEN}[Gitea Init]${NC} ✓ Webhook configurado: ${webhook_url}"
+            return 0
+        fi
+    fi
+    
+    echo -e "${YELLOW}[Gitea Init]${NC} Creando webhook de Jenkins..."
+    
+    # Crear el webhook mediante la API de Gitea
+    # Documentación: https://docs.gitea.io/api-usage/#repositories
+    local response=$(curl -s -w "\n%{http_code}" -X POST "${GITEA_URL}/api/v1/repos/${owner}/${repo}/hooks" \
+        -u "${admin_user}:${admin_password}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"type\": \"gitea\",
+            \"config\": {
+                \"url\": \"${webhook_url}\",
+                \"content_type\": \"json\",
+                \"http_method\": \"POST\"
+            },
+            \"events\": [
+                \"push\",
+                \"pull_request\",
+                \"create\",
+                \"delete\"
+            ],
+            \"active\": true,
+            \"branch_filter\": \"*\"
+        }" 2>/dev/null)
+    
+    local http_code=$(echo "$response" | tail -n1)
+    local response_body=$(echo "$response" | sed '$d')
+    
+    if [ "$http_code" = "201" ]; then
+        echo -e "${GREEN}[Gitea Init]${NC} ✓ Webhook de Jenkins creado exitosamente!"
+        echo -e "${GREEN}[Gitea Init]${NC}   URL: ${webhook_url}"
+        echo -e "${GREEN}[Gitea Init]${NC}   Eventos: push, pull_request, create, delete"
+        return 0
+    elif [ "$http_code" = "422" ] || [ "$http_code" = "409" ]; then
+        # Webhook puede existir o haber un conflicto
+        echo -e "${YELLOW}[Gitea Init]${NC} ⚠ El webhook ya existe o hay un conflicto (HTTP ${http_code})"
+        echo -e "${GREEN}[Gitea Init]${NC} ✓ Webhook configurado: ${webhook_url}"
+        return 0
+    else
+        echo -e "${YELLOW}[Gitea Init]${NC} ⚠ Error al crear webhook (HTTP ${http_code})"
+        if [ -n "$response_body" ]; then
+            echo -e "${YELLOW}[Gitea Init]${NC} Respuesta: $(echo "$response_body" | head -3)"
+        fi
+        echo -e "${YELLOW}[Gitea Init]${NC} ℹ️  El webhook puede crearse manualmente desde la UI de Gitea"
+        echo -e "${YELLOW}[Gitea Init]${NC} ℹ️  O verifica que Jenkins esté disponible en ${webhook_url}"
+        return 0  # No fallar si el webhook no se puede crear
+    fi
+}
+
 # Ejecutar creación de usuario y repositorio
 create_jenkins_user "$GITEA_JENKINS_USER" "$GITEA_JENKINS_PASSWORD" "$GITEA_JENKINS_EMAIL" "$GITEA_ADMIN_USER" "$GITEA_ADMIN_PASSWORD" || exit 1
 
 create_repository "$GITEA_REPO_OWNER" "$GITEA_REPO_NAME" "$GITEA_REPO_PRIVATE" "$GITEA_REPO_DESCRIPTION" "$GITEA_ADMIN_USER" "$GITEA_ADMIN_PASSWORD" || exit 1
 
 push_local_repository "$GITEA_ADMIN_USER" "$GITEA_ADMIN_PASSWORD" || echo -e "${YELLOW}[Gitea Init]${NC} ⚠ Push automático falló, pero el repositorio está creado"
+
+# Crear webhook de Jenkins (después de crear el repositorio)
+echo ""
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}[Paso 5/5] CREAR WEBHOOK DE JENKINS${NC}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+create_jenkins_webhook "$GITEA_REPO_OWNER" "$GITEA_REPO_NAME" "$GITEA_ADMIN_USER" "$GITEA_ADMIN_PASSWORD" || echo -e "${YELLOW}[Gitea Init]${NC} ⚠ Webhook no se pudo crear, pero puedes crearlo manualmente"
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
@@ -692,5 +795,8 @@ echo -e "   Base de datos: ${GITEA_DB_NAME} (MySQL)"
 echo -e "   Usuario admin: ${GITEA_ADMIN_USER}"
 echo -e "   Usuario Jenkins: ${GITEA_JENKINS_USER}"
 echo -e "   Repositorio: ${GITEA_URL}/${GITEA_REPO_OWNER}/${GITEA_REPO_NAME}"
+if [ "$GITEA_CREATE_WEBHOOK" = "true" ]; then
+    echo -e "   Webhook Jenkins: http://${JENKINS_HOST}:${JENKINS_PORT}${JENKINS_WEBHOOK_PATH}"
+fi
 echo ""
 

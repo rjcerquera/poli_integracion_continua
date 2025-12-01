@@ -57,6 +57,16 @@ GITEA_JENKINS_EMAIL=jenkins@example.com
 # ============================================
 GITEA_AUTO_PUSH=true                # true = hace push automático, false = solo crea repo
 GITEA_REPO_PATH=/workspace          # Ruta del repositorio local a hacer push
+
+# ============================================
+# CONFIGURACIÓN DE WEBHOOK DE JENKINS
+# ============================================
+# NOTA: JENKINS_HOST debe ser el nombre del SERVICIO en docker-compose (jenkins)
+#       Dentro de la red Docker, los servicios se comunican usando el nombre del servicio
+JENKINS_HOST=jenkins                # Nombre del servicio Jenkins en docker-compose
+JENKINS_PORT=8080                   # Puerto interno de Jenkins (dentro de la red Docker)
+JENKINS_WEBHOOK_PATH=/gitea-webhook/post  # Ruta del endpoint de webhook en Jenkins
+GITEA_CREATE_WEBHOOK=true           # true = crea webhook automáticamente, false = omite
 ```
 
 ### Variables Importantes
@@ -122,6 +132,12 @@ El script `init-gitea-complete.sh` realiza los siguientes pasos en orden:
 3. ✅ Configura la visibilidad del repositorio (público/privado)
 4. ✅ **OPCIONAL**: Hace push automático del código local (si `GITEA_AUTO_PUSH=true`)
 
+### Paso 5: Crear Webhook de Jenkins
+1. ✅ Crea automáticamente un webhook en el repositorio apuntando a Jenkins
+2. ✅ Configura eventos que activarán el webhook (push, pull_request, create, delete)
+3. ✅ Usa el nombre del servicio Jenkins dentro de la red Docker (`jenkins:8080`)
+4. ✅ URL del webhook: `http://jenkins:8080/gitea-webhook/post`
+
 ## 🔍 Verificar que funcionó
 
 ```bash
@@ -135,6 +151,7 @@ docker logs gitea_bootstrap
 # [Gitea Init] ✓ Repositorio creado exitosamente!
 # [Gitea Init] URL: http://gitea:3000/admin/poli_integracion_continua
 # [Gitea Init] ✓ Push exitoso o ya está actualizado! (si GITEA_AUTO_PUSH=true)
+# [Gitea Init] ✓ Webhook de Jenkins creado exitosamente! (si GITEA_CREATE_WEBHOOK=true)
 ```
 
 Luego accede a Gitea en `http://localhost:3001` (o la URL configurada) y verifica que:
@@ -142,6 +159,7 @@ Luego accede a Gitea en `http://localhost:3001` (o la URL configurada) y verific
 - ✅ El usuario admin existe (puedes iniciar sesión con las credenciales configuradas)
 - ✅ El usuario Jenkins existe
 - ✅ El código está subido (si habilitaste push automático)
+- ✅ El webhook de Jenkins está configurado (ir a Settings → Webhooks del repositorio)
 
 ## 🔧 Troubleshooting
 

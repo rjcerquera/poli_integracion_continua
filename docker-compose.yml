@@ -1,4 +1,4 @@
-version: '3.8'
+version: '3.9'
 
 services:
   # Backend - Laravel API
@@ -92,8 +92,9 @@ services:
     volumes:
       - jenkins-data:/var/jenkins_home
       - /var/run/docker.sock:/var/run/docker.sock
-      # Montar Jenkinsfile para que esté disponible en el contenedor
-      - ./jenkins/Jenkinsfile:/var/jenkins_home/jenkins-pipeline/Jenkinsfile:ro
+      # Montar carpetas de pipelines para desarrollo (opcional, se copian en el Dockerfile)
+      # Descomentar para desarrollo activo de pipelines:
+      # - ./jenkins/pipelines:/var/jenkins_home/pipelines:ro
     environment:
       - JENKINS_ADMIN_ID=${JENKINS_ADMIN_ID:-admin}
       - JENKINS_ADMIN_PASSWORD=${JENKINS_ADMIN_PASSWORD:-admin123}
@@ -102,6 +103,13 @@ services:
       # Credenciales de Gitea para Jenkins
       - GITEA_USERNAME=${GITEA_USERNAME:-jenkins}
       - GITEA_PASSWORD=${GITEA_PASSWORD:-jenkins123}
+      # Configuración de SMTP (MailHog)
+      - SMTP_HOST=${SMTP_HOST:-minio}
+      - SMTP_PORT=${SMTP_PORT:-1025}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-jenkins@localhost}
+      - SMTP_TO=${SMTP_TO:-admin@example.com}
     networks:
       - app-network
     restart: unless-stopped
@@ -111,6 +119,25 @@ services:
       timeout: 10s
       start_period: 120s
       retries: 5
+
+  # MailHog - Servidor SMTP para pruebas y desarrollo
+  # NOTA: MailHog es un servidor SMTP que captura emails enviados y los muestra en su interfaz web
+  # Interfaz web: http://localhost:8025
+  # Servidor SMTP: minio:1025 (dentro de la red Docker) o localhost:1025 (desde el host)
+  minio:
+    image: mailhog/mailhog:latest
+    container_name: ${MAILHOG_CONTAINER_NAME:-mailhog_server}
+    ports:
+      - "${MAILHOG_HTTP_PORT:-8025}:8025"  # Interfaz web para ver emails
+      - "${MAILHOG_SMTP_PORT:-1025}:1025"  # Puerto SMTP
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 1025 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   # Gitea - Servidor Git Liviano (~200MB RAM)
   gitea:
@@ -153,6 +180,10 @@ services:
       # Deshabilitar registro público (seguridad)
       - GITEA__service__DISABLE_REGISTRATION=${GITEA_DISABLE_REGISTRATION:-true}
       - GITEA__security__INSTALL_LOCK=true
+      # Configuración de webhooks
+      # NOTA: ALLOWED_HOST_LIST permite que Gitea envíe webhooks a estos hosts
+      #       Sin esta configuración, Gitea bloqueará las llamadas de webhook por seguridad
+      - GITEA__webhook__ALLOWED_HOST_LIST=${GITEA_WEBHOOK_ALLOWED_HOSTS:-jenkins,localhost,127.0.0.1}
     networks:
       - app-network
     depends_on:
@@ -162,6 +193,8 @@ services:
 
   # Gitea Bootstrap - Inicialización completa de Gitea
   # Incluye: inicialización de MySQL, creación de usuarios, repositorios y push del código
+  # NOTA: Este servicio se ejecuta automáticamente y permanece activo después de completar la inicialización
+  #       Esto permite hacer push manuales al repositorio cuando sea necesario
   gitea-bootstrap:
     build:
       context: ./gitea-bootstrap
@@ -201,12 +234,26 @@ services:
       - GITEA_JENKINS_EMAIL=${GITEA_EMAIL:-jenkins@example.com}
       - GITEA_AUTO_PUSH=${GITEA_AUTO_PUSH:-true}
       - GITEA_REPO_PATH=/workspace
+      # Configuración para webhook de Jenkins
+      # NOTA: JENKINS_HOST debe ser el nombre del SERVICIO (jenkins), no el nombre del contenedor
+      - JENKINS_HOST=${JENKINS_HOST:-jenkins}
+      - JENKINS_PORT=${JENKINS_PORT:-8080}
+      # NOTA: Usar Generic Webhook Trigger endpoint para activar pipelines automáticamente
+      #       El endpoint /gitea-webhook/post solo funciona con Multibranch Pipelines
+      - JENKINS_WEBHOOK_PATH=${JENKINS_WEBHOOK_PATH:-/generic-webhook-trigger/invoke?token=gitea-webhook-token}
+      - JENKINS_WEBHOOK_TOKEN=${JENKINS_WEBHOOK_TOKEN:-gitea-webhook-token}
+      - GITEA_CREATE_WEBHOOK=${GITEA_CREATE_WEBHOOK:-true}
     networks:
       - app-network
     depends_on:
       mysql:
         condition: service_healthy
-    restart: "no"
+      gitea:
+        condition: service_started
+    restart: unless-stopped
+    # NOTA: El contenedor permanece activo después de ejecutar el script de inicialización
+    #       Esto permite ejecutar comandos manuales como push al repositorio
+    #       Para acceder: docker exec -it gitea_bootstrap sh
 
 networks:
   app-network:

@@ -63,7 +63,18 @@ tool:
 unclassified:
   location:
     url: "http://localhost:8081/"
-    adminAddress: "admin@example.com"
+    adminAddress: "${SMTP_TO:-admin@example.com}"
+  
+  # Configuración de SMTP (MailHog)
+  # NOTA: MailHog no requiere autenticación, por lo que no se configura authentication
+  mailer:
+    charset: "UTF-8"
+    smtpHost: "${SMTP_HOST:-minio}"
+    smtpPort: "${SMTP_PORT:-1025}"
+    useSsl: false
+    useTls: false
+    defaultSuffix: "@localhost"
+    replyToAddress: "${SMTP_FROM:-jenkins@localhost}"
   
   # Configuración de servidores Gitea
   giteaServers:

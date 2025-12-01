@@ -1,0 +1,855 @@
+pipeline {
+    agent any
+    
+    // Este pipeline se activa automáticamente cuando Gitea envía un webhook
+    // después de un push, pull request u otro evento configurado
+    // Utiliza Generic Webhook Trigger para recibir y procesar el webhook
+    
+    environment {
+        // ============================================
+        // NOMBRES DE SERVICIOS (para comunicación HTTP entre contenedores)
+        // ============================================
+        // NOTA: Estos son los nombres de los SERVICIOS en docker-compose.yml
+        //       Se usan para comunicación HTTP dentro de la red Docker
+        GITEA_SERVICE = "gitea"
+        GITEA_PORT = "3000"
+        JENKINS_SERVICE = "jenkins"
+        
+        // ============================================
+        // CONFIGURACIÓN DE GITEA
+        // ============================================
+        // Valores por defecto, se pueden sobrescribir desde el webhook
+        GITEA_REPO_NAME = "${env.GITEA_REPO_NAME ?: 'poli_integracion_continua'}"
+        GITEA_REPO_OWNER = "${env.GITEA_REPO_OWNER ?: 'admin'}"
+        
+        // ============================================
+        // CONFIGURACIÓN DE DOCKER PARA TESTING
+        // ============================================
+        // NOTA: Usando Docker-out-of-Docker (DooD), Jenkins usa el Docker del host
+        LARAVEL_TEST_IMAGE_NAME = "laravel-test"
+        LARAVEL_TEST_IMAGE_TAG = "${BUILD_NUMBER}"
+        DOCKER_HOST = "unix:///var/run/docker.sock"
+        
+        // ============================================
+        // CONFIGURACIÓN DE SMTP (MAILHOG)
+        // ============================================
+        SMTP_HOST = "${env.SMTP_HOST ?: 'minio'}"
+        SMTP_PORT = "${env.SMTP_PORT ?: '1025'}"
+        SMTP_FROM = "${env.SMTP_FROM ?: 'jenkins@localhost'}"
+        SMTP_TO = "${env.SMTP_TO ?: 'admin@example.com'}"
+        
+    }
+    
+    triggers {
+        // Generic Webhook Trigger - Se activa cuando Gitea envía webhook a:
+        // http://jenkins:8080/generic-webhook-trigger/invoke
+        GenericTrigger(
+            genericVariables: [
+                [
+                    key: 'ref',
+                    value: '$.ref',
+                    expressionType: 'JSONPath',
+                    defaultValue: ''
+                ],
+                [
+                    key: 'branch',
+                    value: '$.ref',
+                    expressionType: 'JSONPath',
+                    regexpFilter: 'refs/heads/(.*)',
+                    defaultValue: ''
+                ],
+                [
+                    key: 'commit_sha',
+                    value: '$.after',
+                    expressionType: 'JSONPath',
+                    defaultValue: ''
+                ],
+                [
+                    key: 'commit_message',
+                    value: '$.head_commit.message',
+                    expressionType: 'JSONPath',
+                    defaultValue: ''
+                ],
+                [
+                    key: 'repo_name',
+                    value: '$.repository.name',
+                    expressionType: 'JSONPath',
+                    defaultValue: ''
+                ],
+                [
+                    key: 'repo_owner',
+                    value: '$.repository.owner.login',
+                    expressionType: 'JSONPath',
+                    defaultValue: ''
+                ],
+                [
+                    key: 'pusher_name',
+                    value: '$.pusher.login',
+                    expressionType: 'JSONPath',
+                    defaultValue: ''
+                ]
+            ],
+            causeString: 'Triggered by Gitea webhook: $branch',
+            token: 'gitea-webhook-token',
+            printContributedVariables: true,
+            printPostContent: true,
+            silentResponse: false
+        )
+    }
+    
+    stages {
+        stage('Información del Webhook') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  📥 WEBHOOK RECIBIDO DE GITEA                                 ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    // Información del build
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "📊 INFORMACIÓN DEL BUILD"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    echo "Build Number: #${BUILD_NUMBER}"
+                    echo "Build URL: ${BUILD_URL}"
+                    echo "Workspace: ${WORKSPACE}"
+                    echo ""
+                    
+                    // Información del webhook recibido (variables extraídas por Generic Webhook Trigger)
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "📦 INFORMACIÓN DEL WEBHOOK (Extraída del payload)"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    // Variables extraídas del webhook por Generic Webhook Trigger
+                    // NOTA: Las variables pueden estar vacías si el webhook no viene de un push
+                    def refValue = env.ref ?: ''
+                    def branch = env.branch ?: (refValue ? refValue.replace('refs/heads/', '') : 'dev')
+                    def commitSha = env.commit_sha ?: 'unknown'
+                    def commitMsg = env.commit_message ?: 'unknown'
+                    def repoName = env.repo_name ?: env.GITEA_REPO_NAME
+                    def repoOwner = env.repo_owner ?: env.GITEA_REPO_OWNER
+                    def pusherName = env.pusher_name ?: 'unknown'
+                    
+                    echo "Rama: ${branch}"
+                    echo "Commit SHA: ${commitSha}"
+                    echo "Mensaje: ${commitMsg}"
+                    echo "Repositorio: ${repoOwner}/${repoName}"
+                    echo "Usuario: ${pusherName}"
+                    echo "Tipo de evento: push (desde webhook de Gitea)"
+                    echo ""
+                    
+                    // Actualizar variables de entorno con valores del webhook
+                    env.GITEA_REPO_OWNER = repoOwner
+                    env.GITEA_REPO_NAME = repoName
+                    env.GITEA_BRANCH = branch
+                    env.GITEA_COMMIT_SHA = commitSha
+                }
+            }
+        }
+        
+        stage('Checkout desde Gitea') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  📥 CHECKOUT DESDE GITEA                                      ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    // URL del repositorio en Gitea usando el nombre del servicio
+                    def giteaServerUrl = "http://${env.GITEA_SERVICE}:${env.GITEA_PORT}"
+                    def repoUrl = "${giteaServerUrl}/${env.GITEA_REPO_OWNER}/${env.GITEA_REPO_NAME}.git"
+                    
+                    echo "📦 Repositorio: ${repoUrl}"
+                    echo "🔑 Usando credenciales: gitea-credentials"
+                    echo ""
+                    
+                    // Determinar la rama a hacer checkout (desde el webhook o usar por defecto)
+                    // NOTA: Si las variables del webhook están vacías, usar valores por defecto
+                    def refValue = env.ref ?: ''
+                    def branchFromWebhook = env.branch ?: (refValue ? refValue.replace('refs/heads/', '') : 'dev')
+                    
+                    // Validar que la rama no tenga valores incorrectos
+                    if (branchFromWebhook.contains('/usr/share') || branchFromWebhook.contains('ref')) {
+                        branchFromWebhook = 'dev'
+                        echo "⚠️  Rama inválida detectada, usando rama por defecto: dev"
+                    }
+                    
+                    def branchPattern = "*/${branchFromWebhook}"
+                    
+                    echo "🌿 Haciendo checkout de rama: ${branchFromWebhook} (patrón: ${branchPattern})"
+                    
+                    // Checkout desde Gitea usando la rama del webhook
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [
+                            [name: branchPattern],
+                            [name: '*/main'],
+                            [name: '*/master'],
+                            [name: '*/develop'],
+                            [name: '*/dev']
+                        ],
+                        doGenerateSubmoduleConfigurations: false,
+                        extensions: [],
+                        submoduleCfg: [],
+                        userRemoteConfigs: [[
+                            credentialsId: 'gitea-credentials',
+                            url: repoUrl
+                        ]]
+                    ])
+                    
+                    // Mostrar información del commit
+                    def commitHash = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def commitMessage = sh(
+                        script: 'git log -1 --pretty=format:"%s"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def branchName = sh(
+                        script: 'git rev-parse --abbrev-ref HEAD',
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo ""
+                    echo "✅ Checkout completado"
+                    echo "📌 Rama: ${branchName}"
+                    echo "🔖 Commit: ${commitHash}"
+                    echo "📝 Mensaje: ${commitMessage}"
+                    echo ""
+                }
+            }
+        }
+        
+        stage('Build Laravel Test Image') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  🐳 CONSTRUYENDO IMAGEN DE TESTING LARAVEL                    ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🔧 CONFIGURACIÓN"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    echo "Imagen: ${env.LARAVEL_TEST_IMAGE_NAME}:${env.LARAVEL_TEST_IMAGE_TAG}"
+                    echo "Dockerfile: backend/Dockerfile.test"
+                    echo "Docker Host: ${env.DOCKER_HOST}"
+                    echo "Workspace: ${WORKSPACE}"
+                    echo ""
+                    
+                    // Verificar que Docker está disponible (Docker-out-of-Docker)
+                    echo "🔍 Verificando acceso a Docker..."
+                    
+                    // Intentar primero sin sudo, luego con sudo
+                    def dockerCmd = 'docker'
+                    def dockerWorks = sh(
+                        script: "${dockerCmd} ps > /dev/null 2>&1",
+                        returnStatus: true
+                    ) == 0
+                    
+                    if (!dockerWorks) {
+                        echo "⚠️  Docker sin sudo no funciona, intentando con sudo..."
+                        dockerCmd = 'sudo docker'  // Usar sudo (configurado sin contraseña en Dockerfile)
+                        dockerWorks = sh(
+                            script: "${dockerCmd} ps > /dev/null 2>&1",
+                            returnStatus: true
+                        ) == 0
+                    }
+                    
+                    if (!dockerWorks) {
+                        echo "❌ Error: No se pudo conectar al Docker daemon"
+                        echo "💡 Verifica que:"
+                        echo "   1. El socket de Docker está montado en /var/run/docker.sock"
+                        echo "   2. El usuario jenkins está en el grupo docker"
+                        echo "   3. La configuración de sudo permite ejecutar docker sin contraseña"
+                        echo ""
+                        echo "🔍 Diagnosticando..."
+                        sh """
+                            echo "Grupos del usuario jenkins:"
+                            groups jenkins || id jenkins
+                            echo ""
+                            echo "Permisos del socket Docker:"
+                            ls -la /var/run/docker.sock 2>/dev/null || echo "Socket no encontrado"
+                            echo ""
+                            echo "Configuración de sudoers:"
+                            sudo cat /etc/sudoers.d/jenkins 2>/dev/null || echo "No se pudo leer sudoers"
+                        """
+                        exit 1
+                    }
+                    
+                    echo "✅ Docker está disponible con: ${dockerCmd}"
+                    env.DOCKER_CMD = dockerCmd  // Guardar para uso en siguientes stages
+                    echo ""
+                    
+                    // Usar Dockerfile principal con variables de entorno para testing
+                    echo "🔍 Usando Dockerfile principal con configuración para testing..."
+                    def dockerfilePath = "backend/Dockerfile"
+                    
+                    if (!fileExists(dockerfilePath)) {
+                        error("❌ No se encontró ${dockerfilePath} en el repositorio")
+                    }
+                    
+                    echo "✅ Dockerfile encontrado: ${dockerfilePath}"
+                    echo ""
+                    
+                    // Construir la imagen de Docker directamente (código inline)
+                    // Usar php:8.2-cli para testing y configurar variables de entorno
+                    echo "🔨 Construyendo imagen de Docker para testing..."
+                    sh """
+                        cd ${WORKSPACE}
+                        ${dockerCmd} build \\
+                            -f ${dockerfilePath} \\
+                            -t ${env.LARAVEL_TEST_IMAGE_NAME}:${env.LARAVEL_TEST_IMAGE_TAG} \\
+                            --build-arg PHP_IMAGE=php:8.2-cli \\
+                            --build-arg APP_ENV=testing \\
+                            --build-arg DB_CONNECTION=sqlite \\
+                            --build-arg DB_DATABASE=:memory: \\
+                            --build-arg BUILD_DATE="\$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \\
+                            --build-arg BUILD_NUMBER=${BUILD_NUMBER} \\
+                            --build-arg GIT_COMMIT=\$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") \\
+                            .
+                    """
+                    
+                    // Etiquetar también como 'latest'
+                    if (env.LARAVEL_TEST_IMAGE_TAG != "latest") {
+                        echo "🏷️  Etiquetando también como 'latest'..."
+                        sh "${dockerCmd} tag ${env.LARAVEL_TEST_IMAGE_NAME}:${env.LARAVEL_TEST_IMAGE_TAG} ${env.LARAVEL_TEST_IMAGE_NAME}:latest"
+                    }
+                    
+                    echo ""
+                    echo "✅ Imagen construida exitosamente"
+                    echo ""
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  🧪 EJECUTANDO PRUEBAS DE LARAVEL                            ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    // Usar el comando docker del stage anterior
+                    def dockerCmd = env.DOCKER_CMD ?: 'sudo docker'
+                    echo "🔧 Usando comando Docker: ${dockerCmd}"
+                    
+                    def imageName = "${env.LARAVEL_TEST_IMAGE_NAME}:${env.LARAVEL_TEST_IMAGE_TAG}"
+                    
+                    // Verificar que la imagen existe
+                    echo "🔍 Verificando que la imagen existe..."
+                    def imageExists = sh(
+                        script: "${dockerCmd} image inspect ${imageName} > /dev/null 2>&1",
+                        returnStatus: true
+                    ) == 0
+                    
+                    if (!imageExists) {
+                        error("❌ La imagen ${imageName} no existe. Ejecuta primero el stage 'Build Laravel Test Image'")
+                    }
+                    
+                    echo "✅ Imagen encontrada: ${imageName}"
+                    echo ""
+                    
+                    // Ejecutar pruebas directamente (código inline)
+                    echo "🧪 Ejecutando pruebas de Laravel con cobertura..."
+                    def testExitCode = sh(
+                        script: """
+                            ${dockerCmd} run --rm \\
+                                ${imageName} \\
+                                ./vendor/bin/phpunit --coverage-text 2>&1
+                        """,
+                        returnStatus: true
+                    )
+                    
+                    // Capturar output completo de las pruebas
+                    def testOutput = sh(
+                        script: """
+                            ${dockerCmd} run --rm \\
+                                ${imageName} \\
+                                ./vendor/bin/phpunit --coverage-text 2>&1 || true
+                        """,
+                        returnStdout: true
+                    )
+                    
+                    // Mostrar output de las pruebas
+                    echo testOutput
+                    echo ""
+                    
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "📊 VALIDANDO RESULTADOS DE PRUEBAS"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    // Validar que las pruebas pasaron
+                    def testsPassed = testOutput.contains("OK (")
+                    if (testsPassed) {
+                        echo "✅ Todas las pruebas pasaron"
+                        // Extraer estadísticas si están disponibles
+                        def testStats = testOutput.split('\n').find { it.matches(/.*OK \\([0-9]+ tests, [0-9]+ assertions\\).*/) }
+                        if (testStats) {
+                            echo "📈 Estadísticas: ${testStats.trim()}"
+                        }
+                    } else {
+                        echo "❌ Algunas pruebas fallaron"
+                        if (testExitCode != 0) {
+                            error("❌ Pruebas fallaron con código de salida: ${testExitCode}")
+                        }
+                    }
+                    
+                    // Validar cobertura de código (requerir 100%)
+                    echo ""
+                    echo "📊 Validando cobertura de código..."
+                    
+                    def coverageLines = testOutput.split('\n').findAll { it.contains("Lines:") || it.contains("Classes:") || it.contains("Methods:") }
+                    
+                    coverageLines.each { line ->
+                        echo "   ${line.trim()}"
+                    }
+                    
+                    // Extraer y validar cobertura de líneas
+                    def linesCoverage = testOutput.split('\n').find { it.contains("Lines:") && it.contains("%") }
+                    if (linesCoverage) {
+                        def coveragePercent = linesCoverage =~ /([0-9]+\\.[0-9]+)%/
+                        if (coveragePercent) {
+                            def percentValue = coveragePercent[0][1] as Double
+                            if (percentValue < 100.0) {
+                                error("❌ Cobertura de código insuficiente: ${percentValue}% < 100%")
+                            }
+                            echo "✅ Cobertura de código del 100% alcanzada"
+                        }
+                    } else {
+                        echo "⚠️  No se pudo extraer información de cobertura"
+                    }
+                    
+                    echo ""
+                    echo "✅ Pruebas completadas exitosamente"
+                    echo ""
+                }
+            }
+            post {
+                always {
+                    script {
+                        echo ""
+                        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        echo "🧹 LIMPIEZA DE IMAGEN DE TESTING"
+                        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        echo ""
+                        
+                        // Limpiar imagen de testing después de las pruebas (para liberar espacio)
+                        def dockerCmd = env.DOCKER_CMD ?: 'sudo docker'
+                        def imageName = "${env.LARAVEL_TEST_IMAGE_NAME}:${env.LARAVEL_TEST_IMAGE_TAG}"
+                        
+                        echo "🗑️  Eliminando imagen de testing: ${imageName}"
+                        
+                        def removed = sh(
+                            script: "${dockerCmd} rmi ${imageName} || true",
+                            returnStdout: true
+                        ).trim()
+                        
+                        if (removed.contains("Deleted") || removed.contains("Untagged")) {
+                            echo "✅ Imagen de testing eliminada exitosamente"
+                        } else {
+                            echo "ℹ️  La imagen ya fue eliminada o no existe"
+                        }
+                        
+                        // También eliminar la etiqueta 'latest' si existe
+                        def latestImageName = "${env.LARAVEL_TEST_IMAGE_NAME}:latest"
+                        sh """
+                            ${dockerCmd} rmi ${latestImageName} 2>/dev/null || echo "ℹ️  Imagen 'latest' no encontrada o ya eliminada"
+                        """
+                        
+                        echo ""
+                        echo "✅ Limpieza completada"
+                        echo ""
+                    }
+                }
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  🔨 BUILD IMAGEN DE PRODUCCIÓN CON DOCKER-COMPOSE            ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🔧 CONFIGURACIÓN"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    // Usar el comando docker del stage anterior
+                    def dockerCmd = env.DOCKER_CMD ?: 'sudo docker'
+                    
+                    // Usar Docker Compose v2 (plugin integrado con Docker CLI)
+                    echo "🔍 Verificando Docker Compose v2 disponible..."
+                    
+                    def dockerComposeV2 = sh(
+                        script: "${dockerCmd} compose version > /dev/null 2>&1 && echo 'yes' || echo 'no'",
+                        returnStdout: true
+                    ).trim()
+                    
+                    if (dockerComposeV2 != 'yes') {
+                        error("""
+                            ❌ ERROR: Docker Compose v2 no está disponible
+                            
+                            Docker Compose v2 (docker compose) no está instalado o no funciona.
+                            
+                            Soluciones:
+                            1. Reconstruir la imagen de Jenkins para instalar docker-compose-plugin
+                            2. Verificar que docker-compose-plugin esté instalado: docker compose version
+                            
+                            Comando de diagnóstico:
+                            - ${dockerCmd} compose version
+                        """)
+                    }
+                    
+                    // Docker Compose v2 usa: docker compose (sin guion)
+                    def dockerComposeCmd = 'docker compose'
+                    echo "✅ Docker Compose v2 encontrado (docker compose)"
+                    
+                    // Verificar versión
+                    def composeVersion = sh(
+                        script: "${dockerCmd} compose version",
+                        returnStdout: true
+                    ).trim()
+                    echo "   ${composeVersion}"
+                    
+                    // Si dockerCmd incluye sudo, también añadirlo al docker-compose
+                    if (dockerCmd.contains('sudo')) {
+                        dockerComposeCmd = "sudo docker compose"
+                    }
+                    
+                    echo ""
+                    echo "Comando Docker: ${dockerCmd}"
+                    echo "Comando Docker Compose: ${dockerComposeCmd}"
+                    echo "Workspace: ${WORKSPACE}"
+                    echo ""
+                    
+                    // Verificar que docker-compose.yml existe
+                    if (!fileExists("docker-compose.yml")) {
+                        error("❌ No se encontró docker-compose.yml en el repositorio")
+                    }
+                    
+                    echo "✅ docker-compose.yml encontrado"
+                    echo ""
+                    
+                    // Determinar el nombre del proyecto de Docker Compose
+                    // IMPORTANTE: Docker Compose usa el nombre del directorio como prefijo del proyecto
+                    // Necesitamos usar el mismo nombre que se usa desde el directorio raíz del host
+                    // Estrategia: Obtener el nombre del directorio desde la ruta del workspace
+                    // o usar una variable de entorno si está disponible
+                    def projectName = env.DOCKER_COMPOSE_PROJECT_NAME ?: "project"
+                    
+                    // Intentar detectar el nombre de proyecto desde el contenedor existente
+                    def existingProjectName = sh(
+                        script: """
+                            ${dockerCmd} inspect laravel_backend --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null || echo ""
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    
+                    if (existingProjectName && existingProjectName != "") {
+                        projectName = existingProjectName
+                        echo "📋 Nombre de proyecto detectado desde contenedor existente: ${projectName}"
+                    } else {
+                        echo "📋 Usando nombre de proyecto por defecto: ${projectName}"
+                    }
+                    echo ""
+                    
+                    // Obtener el nombre de la red existente del contenedor mysql
+                    def networkName = sh(
+                        script: """
+                            ${dockerCmd} inspect laravel_mysql --format '{{range \$net, \$conf := .NetworkSettings.Networks}}{{\$net}}{{end}}' 2>/dev/null | head -1 || echo "project_app-network"
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "📋 Red de Docker detectada: ${networkName}"
+                    echo ""
+                    
+                    // 1. Detener y eliminar el contenedor backend existente (por nombre directo)
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🛑 DETENIENDO Y ELIMINANDO CONTENEDOR BACKEND EXISTENTE"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    sh """
+                        # Detener contenedor backend por nombre (si existe)
+                        ${dockerCmd} stop laravel_backend 2>/dev/null || echo "⚠️  El contenedor laravel_backend no estaba corriendo"
+                        
+                        # Eliminar contenedor backend por nombre (si existe)
+                        ${dockerCmd} rm -f laravel_backend 2>/dev/null || echo "⚠️  El contenedor laravel_backend no existía"
+                    """
+                    echo ""
+                    
+                    // 2. Limpiar imágenes dangling y antiguas (opcional)
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🧹 LIMPIEZA DE IMÁGENES"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    sh """
+                        cd ${WORKSPACE}
+                        # Limpiar imágenes dangling (sin tag, huérfanas)
+                        ${dockerCmd} image prune -f || echo "ℹ️  No hay imágenes dangling para limpiar"
+                        
+                        # Nota: La imagen específica del backend se recreará en el siguiente paso
+                        echo "✅ Limpieza completada"
+                    """
+                    echo ""
+                    
+                    // 3. Reconstruir la imagen de producción usando docker-compose
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🔨 RECONSTRUYENDO IMAGEN DE PRODUCCIÓN"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    echo "ℹ️  Usando variables de entorno desde docker-compose.yml"
+                    echo "ℹ️  Contexto: ${WORKSPACE}"
+                    echo "ℹ️  Dockerfile: backend/Dockerfile"
+                    echo "ℹ️  Proyecto: ${projectName}"
+                    echo ""
+                    
+                    sh """
+                        cd ${WORKSPACE}
+                        # Construir la imagen usando docker compose con el nombre de proyecto correcto
+                        ${dockerComposeCmd} --project-name ${projectName} build --no-cache backend
+                    """
+                    echo ""
+                    
+                    // Guardar variables para el stage Deploy
+                    env.DOCKER_COMPOSE_CMD = dockerComposeCmd
+                    env.DOCKER_COMPOSE_PROJECT_NAME = projectName
+                    env.DOCKER_NETWORK_NAME = networkName
+                    
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "📊 INFORMACIÓN DE LA IMAGEN CONSTRUIDA"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    sh """
+                        ${dockerCmd} images | grep -E "(backend|REPOSITORY)" | head -5
+                    """
+                    echo ""
+                    
+                    echo "✅ Build de producción completado exitosamente"
+                    echo "ℹ️  La imagen está lista para ser desplegada en el stage 'Deploy'"
+                    echo ""
+                }
+            }
+        }
+        
+        stage('Deploy') {
+            steps {
+                script {
+                    echo ""
+                    echo "╔════════════════════════════════════════════════════════════════╗"
+                    echo "║  🚀 DEPLOY - LEVANTAR SERVICIO BACKEND                        ║"
+                    echo "╚════════════════════════════════════════════════════════════════╝"
+                    echo ""
+                    
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🔧 CONFIGURACIÓN"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    // Usar el comando docker del stage anterior
+                    def dockerCmd = env.DOCKER_CMD ?: 'sudo docker'
+                    
+                    // Obtener variables guardadas del stage Build
+                    def dockerComposeCmd = env.DOCKER_COMPOSE_CMD ?: 'sudo docker compose'
+                    def projectName = env.DOCKER_COMPOSE_PROJECT_NAME ?: 'project'
+                    def networkName = env.DOCKER_NETWORK_NAME ?: 'project_app-network'
+                    
+                    echo "Comando Docker: ${dockerCmd}"
+                    echo "Comando Docker Compose: ${dockerComposeCmd}"
+                    echo "Nombre de Proyecto: ${projectName}"
+                    echo "Red de Docker: ${networkName}"
+                    echo "Workspace: ${WORKSPACE}"
+                    echo ""
+                    
+                    // Verificar que docker-compose.yml existe
+                    if (!fileExists("docker-compose.yml")) {
+                        error("❌ No se encontró docker-compose.yml en el repositorio")
+                    }
+                    
+                    echo "✅ docker-compose.yml encontrado"
+                    echo ""
+                    
+                    // 1. Detener y eliminar el contenedor backend existente (por nombre directo)
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🛑 DETENIENDO Y ELIMINANDO CONTENEDOR BACKEND EXISTENTE"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    sh """
+                        # Detener contenedor backend por nombre (si existe)
+                        ${dockerCmd} stop laravel_backend 2>/dev/null || echo "⚠️  El contenedor laravel_backend no estaba corriendo"
+                        
+                        # Eliminar contenedor backend por nombre (si existe)
+                        ${dockerCmd} rm -f laravel_backend 2>/dev/null || echo "⚠️  El contenedor laravel_backend no existía"
+                    """
+                    echo ""
+                    
+                    // 2. Levantar el servicio backend sin dependencias (asumiendo que mysql ya está corriendo)
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "🚀 LEVANTANDO SERVICIO BACKEND"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    echo "ℹ️  Usando --no-deps porque mysql ya está corriendo desde el proyecto principal"
+                    echo ""
+                    
+                    sh """
+                        cd ${WORKSPACE}
+                        # Usar --no-deps para no levantar dependencias (mysql ya está corriendo)
+                        # También especificar la red existente para conectar el contenedor a la misma red
+                        ${dockerComposeCmd} --project-name ${projectName} up -d --no-deps backend
+                        
+                        # Asegurarse de que el contenedor está conectado a la red correcta
+                        if ! ${dockerCmd} inspect laravel_backend --format '{{range \$net, \$conf := .NetworkSettings.Networks}}{{\$net}}{{end}}' | grep -q "${networkName}"; then
+                            echo "⚠️  El contenedor no está en la red correcta, conectando..."
+                            ${dockerCmd} network connect ${networkName} laravel_backend 2>/dev/null || echo "ℹ️  Ya está conectado o la red no existe"
+                        fi
+                    """
+                    echo ""
+                    
+                    // 3. Verificar que el servicio se levantó correctamente
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "✅ VERIFICANDO ESTADO DEL SERVICIO"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo ""
+                    
+                    sh """
+                        # Verificar contenedor por nombre directo
+                        ${dockerCmd} ps --filter name=laravel_backend --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || echo "⚠️  No se pudo obtener información del contenedor"
+                        
+                        # Verificar que está corriendo
+                        if ${dockerCmd} ps --filter name=laravel_backend --filter status=running --quiet | grep -q .; then
+                            echo "✅ Contenedor laravel_backend está corriendo correctamente"
+                        else
+                            echo "❌ El contenedor laravel_backend no está corriendo"
+                            exit 1
+                        fi
+                    """
+                    echo ""
+                    
+                    echo "✅ Deploy completado exitosamente"
+                    echo ""
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            script {
+                echo ""
+                echo "✅ Pipeline completado exitosamente"
+                echo "🔗 Build: ${BUILD_URL}"
+                echo ""
+                
+                // Enviar notificación por correo electrónico
+                try {
+                    echo "📧 Enviando notificación por correo electrónico..."
+                    
+                    // Obtener información del commit
+                    def commitHash = env.commit_sha ?: sh(
+                        script: 'git rev-parse --short HEAD 2>/dev/null || echo "unknown"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def commitMessage = env.commit_message ?: sh(
+                        script: 'git log -1 --pretty=format:"%s" 2>/dev/null || echo "No commit message"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def branchName = env.branch ?: sh(
+                        script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown"',
+                        returnStdout: true
+                    ).trim()
+                    
+                    def repoName = env.repo_name ?: "${env.GITEA_REPO_OWNER}/${env.GITEA_REPO_NAME}"
+                    def pusherName = env.pusher_name ?: "Unknown"
+                    
+                    // Preparar el mensaje de correo
+                    def emailSubject = "✅ Pipeline Exitoso - ${repoName} (${branchName})"
+                    def emailBody = """
+Pipeline ejecutado exitosamente
+
+📋 Información del Build:
+   • Pipeline: ${JOB_NAME}
+   • Build #${BUILD_NUMBER}
+   • Estado: ✅ EXITOSO
+   • URL: ${BUILD_URL}
+
+📝 Información del Commit:
+   • Repositorio: ${repoName}
+   • Rama: ${branchName}
+   • Commit: ${commitHash}
+   • Mensaje: ${commitMessage}
+   • Autor: ${pusherName}
+
+🔗 Ver detalles: ${BUILD_URL}
+
+Este es un mensaje automático de Jenkins CI/CD.
+"""
+                    
+                    // Enviar correo usando el plugin mailer de Jenkins
+                    mail(
+                        subject: emailSubject,
+                        body: emailBody,
+                        to: env.SMTP_TO ?: 'admin@example.com',
+                        from: env.SMTP_FROM ?: 'jenkins@localhost'
+                    )
+                    
+                    echo "✅ Notificación por correo enviada exitosamente a: ${env.SMTP_TO ?: 'admin@example.com'}"
+                    echo "ℹ️  Para ver los correos capturados, visita: http://localhost:${env.MAILHOG_HTTP_PORT ?: '8025'}"
+                    
+                } catch (Exception e) {
+                    echo "⚠️  Error al enviar correo: ${e.getMessage()}"
+                    echo "ℹ️  Verifica que el servidor SMTP esté configurado correctamente"
+                    // No fallar el pipeline por un error de correo
+                }
+                
+                // Notificación a Gitea (si el plugin está configurado)
+                // El plugin de Gitea enviará automáticamente la notificación
+            }
+        }
+        failure {
+            script {
+                echo ""
+                echo "❌ Pipeline falló"
+                echo "🔗 Build: ${BUILD_URL}"
+                echo ""
+                echo "ℹ️  La imagen de testing será limpiada automáticamente en el stage 'Run Tests'"
+                echo ""
+            }
+        }
+        always {
+            script {
+                def timestamp = sh(script: "date '+%Y-%m-%d %H:%M:%S'", returnStdout: true).trim()
+                echo ""
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "📝 RESUMEN FINAL"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+                echo "⏰ Completado: ${timestamp}"
+                echo "🔗 Build URL: ${BUILD_URL}"
+                echo ""
+            }
+        }
+    }
+}
